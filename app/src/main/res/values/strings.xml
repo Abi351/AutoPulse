@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">AutoPulse</string>
+    <string name="nav_cockpit">Accueil</string>
+    <string name="nav_media">Musique</string>
+    <string name="nav_settings">Réglages</string>
+    <string name="cd_album_art">Pochette d\'album</string>
+    <string name="cd_play_pause">Lecture ou pause</string>
+    <string name="cd_previous_track">Piste précédente</string>
+    <string name="cd_next_track">Piste suivante</string>
+    <string name="cd_app_drawer">Ouvrir la bibliothèque d\'applications</string>
+    <string name="notification_listener_label">AutoPulse Contrôle Média</string>
+</resources>

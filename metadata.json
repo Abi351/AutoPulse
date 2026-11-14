@@ -1,0 +1,6 @@
+{
+  "name": "AutoPulse",
+  "description": "Launcher autoradio Android 8 paysage thème rouge avec lecteur audio hors ligne & Bluetooth, horloge et dock personnalisable (5 apps).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
