@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
@@ -177,9 +178,9 @@ fun CockpitHomeScreen(
         val sectionGap = if (isCompactHeight) 8.dp else 12.dp
 
         val clockFontSize = when {
-            isCompactHeight -> 46.sp
-            isMediumHeight -> 58.sp
-            else -> 72.sp
+            isCompactHeight -> 40.sp
+            isMediumHeight -> 48.sp
+            else -> 58.sp
         }
         val speedFontSize = when {
             isCompactHeight -> 48.sp
@@ -441,43 +442,57 @@ private fun ClockAndSpeedDashboardCard(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             // Bloc Horloge
-            Column(
-                modifier = Modifier.weight(1.02f),
-                verticalArrangement = Arrangement.Center,
+            BoxWithConstraints(
+                modifier = Modifier.weight(1.06f),
+                contentAlignment = Alignment.CenterStart,
             ) {
-                Row(
-                    verticalAlignment = Alignment.Bottom,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                val maxSafeClockSp = ((maxWidth.value - 38f).coerceAtLeast(62f) / 3.15f)
+                val effectiveClockSize = minOf(clockFontSize.value, maxSafeClockSp)
+                    .coerceIn(22f, 58f)
+                    .sp
+
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.Center,
                 ) {
+                    Row(
+                        verticalAlignment = Alignment.Bottom,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        Text(
+                            text = clockStr,
+                            style = MaterialTheme.typography.displayLarge.copy(
+                                fontSize = effectiveClockSize,
+                                lineHeight = effectiveClockSize * 1.04f,
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.Bold,
+                            ),
+                            color = TextPrimary,
+                            maxLines = 1,
+                            softWrap = false,
+                        )
+                        Text(
+                            text = secondsStr,
+                            style = MaterialTheme.typography.titleLarge.copy(
+                                fontFamily = JetBrainsMonoFamily,
+                            ),
+                            color = primary,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier
+                                .widthIn(min = 32.dp)
+                                .padding(bottom = 6.dp),
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
                     Text(
-                        text = clockStr,
-                        style = MaterialTheme.typography.displayLarge.copy(
-                            fontSize = clockFontSize,
-                            lineHeight = clockFontSize * 1.04f,
-                            fontFamily = JetBrainsMonoFamily,
-                            fontWeight = FontWeight.Bold,
-                        ),
-                        color = TextPrimary,
+                        text = dateStr,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = TextSecondary,
                         maxLines = 1,
-                    )
-                    Text(
-                        text = secondsStr,
-                        style = MaterialTheme.typography.titleLarge.copy(
-                            fontFamily = JetBrainsMonoFamily,
-                        ),
-                        color = primary,
-                        modifier = Modifier.padding(bottom = 8.dp),
-                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
-                Spacer(Modifier.height(6.dp))
-                Text(
-                    text = dateStr,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = TextSecondary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
             }
 
             Box(
@@ -490,7 +505,7 @@ private fun ClockAndSpeedDashboardCard(
             // Zone Compteur GPS (cliquable pour ouvrir le menu dédié "Compteur & Alertes Vitesse")
             Column(
                 modifier = Modifier
-                    .weight(0.98f)
+                    .weight(0.94f)
                     .fillMaxHeight()
                     .clip(RoundedCornerShape(18.dp))
                     .clickable(onClick = onOpenSpeedSettings)
