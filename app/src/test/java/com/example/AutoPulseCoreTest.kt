@@ -200,7 +200,7 @@ class AutoPulseCoreTest {
         assertEquals(6, EqPreset.entries.size)
         assertEquals("Plat", EqPreset.fromIndex(0).label)
         assertEquals("Personnalisé", EqPreset.fromIndex(5).label)
-        assertEquals(listOf(400, -1200, 0, 1200, 0), PreferencesRepository.parseEqBands("400,-1500,0,2000,0"))
+        assertEquals(listOf(400, -1500, 0, 1500, 0), PreferencesRepository.parseEqBands("400,-1500,0,2000,0"))
 
         val context = ApplicationProvider.getApplicationContext<Context>()
         val db = Room.inMemoryDatabaseBuilder(context, AutoPulseDatabase::class.java)
@@ -573,5 +573,91 @@ class AutoPulseCoreTest {
             set(2026, Calendar.NOVEMBER, 15, 10, 30, 0)
         }
         assertEquals("Dim 15 nov 2026", formatShortFrenchDate(cal.time))
+    }
+
+    @Test
+    fun dspEqualizerKeepsFifteenDbRangeAndCustomBandsUnlockedWithoutHardwareEffect() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val engine = AudioEngine(context)
+        try {
+            val initialBands = engine.state.value.eqBands
+            assertEquals(5, initialBands.size)
+            assertTrue(initialBands.all { it.minMb <= (-1500).toShort() && it.maxMb >= 1500.toShort() })
+
+            engine.setEqBandLevel(0, (-1400).toShort())
+            engine.setEqBandLevel(2, 1300.toShort())
+            assertEquals(EqPreset.CUSTOM.index, engine.state.value.eqPresetIndex)
+            assertEquals((-1400).toShort(), engine.state.value.eqBands[0].levelMb)
+            assertEquals(1300.toShort(), engine.state.value.eqBands[2].levelMb)
+
+            engine.applyEqPreset(EqPreset.ROCK.index)
+            assertEquals(EqPreset.ROCK.index, engine.state.value.eqPresetIndex)
+            assertEquals(EqPreset.ROCK.gainsMb[0].toShort(), engine.state.value.eqBands[0].levelMb)
+        } finally {
+            engine.release()
+        }
+    }
+
+    @Test
+    fun bluetoothMetadataSanitizationFiltersInvalidTokens() {
+        assertEquals("", UniversalMediaManager.sanitizeMediaText("Not Provided"))
+        assertEquals("", UniversalMediaManager.sanitizeMediaText("not provided"))
+        assertEquals("", UniversalMediaManager.sanitizeMediaText("Unknown"))
+        assertEquals("", UniversalMediaManager.sanitizeMediaText("<unknown>"))
+        assertEquals("", UniversalMediaManager.sanitizeMediaText("Unknown Artist"))
+        assertEquals("", UniversalMediaManager.sanitizeMediaText("null"))
+        assertEquals("", UniversalMediaManager.sanitizeMediaText("None"))
+        assertEquals("", UniversalMediaManager.sanitizeMediaText("N/A"))
+        assertEquals("", UniversalMediaManager.sanitizeMediaText("--"))
+        assertEquals("Daft Punk", UniversalMediaManager.sanitizeMediaText("  Daft Punk  "))
+    }
+
+    @Test
+    fun fmRadioBroadcastAndNotificationParsingExtractsStationFrequencyAndRds() {
+        val fmIntent = Intent("com.android.fmradio.metachanged").apply {
+            putExtra("freq", 104.3)
+            putExtra("station_name", "RTL2")
+            putExtra("rds_text", "Le Son Pop-Rock")
+            putExtra("playing", true)
+        }
+        val parsed = UniversalMediaManager.parseFmBroadcastIntent(fmIntent, nowMs = 5_000L)
+        assertNotNull(parsed)
+        assertTrue(parsed!!.isActive)
+        assertEquals("104.30", parsed.frequencyMhz)
+        assertEquals("RTL2", parsed.stationName)
+        assertEquals("Le Son Pop-Rock", parsed.rdsText)
+        assertEquals("FM 104.30 MHz • Le Son Pop-Rock", UniversalMediaManager.buildFmSubtitle(parsed.frequencyMhz, parsed.rdsText))
+
+        // Une diffusion musicale standard com.android.music.metachanged sans indices radio est ignorée
+        val regularMusicIntent = Intent("com.android.music.metachanged").apply {
+            putExtra("artist", "The Weeknd")
+            putExtra("track", "Blinding Lights")
+            putExtra("album", "After Hours")
+        }
+        assertEquals(null, UniversalMediaManager.parseFmBroadcastIntent(regularMusicIntent, nowMs = 6_000L))
+
+        // Notification d'application radio FM autoradio (fréquence en kHz ou texte MHz)
+        val microntekIntent = Intent("com.microntek.radio").apply {
+            putExtra("frequency", 99500)
+            putExtra("ps", "NRJ")
+            putExtra("rt", "Hit Music Only")
+        }
+        val microntekParsed = UniversalMediaManager.parseFmBroadcastIntent(microntekIntent, nowMs = 7_000L)
+        assertNotNull(microntekParsed)
+        assertEquals("99.50", microntekParsed!!.frequencyMhz)
+        assertEquals("NRJ", microntekParsed.stationName)
+        assertEquals("Hit Music Only", microntekParsed.rdsText)
+
+        val notifParsed = UniversalMediaManager.parseFmNotification(
+            packageName = "com.ts.main.radio",
+            title = "France Inter 87.8 MHz",
+            text = "Journal de 8h",
+            subText = null,
+            nowMs = 8_000L,
+        )
+        assertNotNull(notifParsed)
+        assertEquals("87.80", notifParsed!!.frequencyMhz)
+        assertEquals("France Inter", notifParsed.stationName)
+        assertEquals("Journal de 8h", notifParsed.rdsText)
     }
 }

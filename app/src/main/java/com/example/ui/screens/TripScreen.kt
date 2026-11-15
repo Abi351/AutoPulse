@@ -30,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -38,9 +39,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.data.PreferencesRepository
 import com.example.data.TripStats
 import com.example.hardware.SpeedGpsState
@@ -52,29 +55,31 @@ import com.example.ui.theme.EmeraldOk
 import com.example.ui.theme.JetBrainsMonoFamily
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import kotlinx.coroutines.flow.StateFlow
 import java.util.Locale
 
 @Composable
 fun TripScreen(
-    tripStats: TripStats,
-    speedState: SpeedGpsState,
+    tripStatsFlow: StateFlow<TripStats>,
+    speedStateFlow: StateFlow<SpeedGpsState>,
     onResetTrip: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val tripStats by tripStatsFlow.collectAsStateWithLifecycle()
     val primary = MaterialTheme.colorScheme.primary
     val accent = MaterialTheme.colorScheme.secondary
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        val isCompactHeight = maxHeight < 440.dp
-        val isMediumHeight = maxHeight in 440.dp..560.dp
-        val outerPad = if (isCompactHeight) 12.dp else 18.dp
-        val gridGap = if (isCompactHeight) 10.dp else 14.dp
+        val isCompactHeight = maxHeight < 450.dp
+        val isMediumHeight = maxHeight in 450.dp..570.dp
+        val outerPad = if (isCompactHeight) 14.dp else 20.dp
+        val gridGap = if (isCompactHeight) 12.dp else 16.dp
         val valueFontSize = when {
-            isCompactHeight -> 34.sp
-            isMediumHeight -> 42.sp
-            else -> 50.sp
+            isCompactHeight -> 42.sp
+            isMediumHeight -> 48.sp
+            else -> 58.sp
         }
-        val cardPad = if (isCompactHeight) 14.dp else 20.dp
+        val cardPad = if (isCompactHeight) 18.dp else 24.dp
 
         Column(
             modifier = Modifier
@@ -82,7 +87,6 @@ fun TripScreen(
                 .padding(outerPad),
             verticalArrangement = Arrangement.spacedBy(gridGap),
         ) {
-            // En-tête Ordinateur de bord
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -94,46 +98,26 @@ fun TripScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .width(24.dp)
+                            .width(26.dp)
                             .height(4.dp)
                             .clip(RoundedCornerShape(2.dp))
                             .background(primary),
                     )
                     Text(
                         text = "ORDINATEUR DE BORD • TRAJET",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                        ),
                         color = accent,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
 
-                val (gpsIcon, gpsLabel, gpsColor) = when {
-                    !speedState.hasPermission -> Triple(Icons.Rounded.GpsOff, "GPS non autorisé", AmberWarn)
-                    !speedState.isGpsEnabled -> Triple(Icons.Rounded.GpsOff, "GPS désactivé", AmberWarn)
-                    !speedState.hasSignalFix -> Triple(Icons.Rounded.GpsNotFixed, "Recherche GPS...", TextSecondary)
-                    else -> Triple(Icons.Rounded.GpsFixed, "${speedState.speedKmh} km/h en direct", EmeraldOk)
-                }
-                Row(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .background(CarbonSurface)
-                        .border(1.dp, gpsColor.copy(alpha = 0.45f), RoundedCornerShape(50))
-                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Icon(gpsIcon, contentDescription = null, tint = gpsColor, modifier = Modifier.size(15.dp))
-                    Text(
-                        text = gpsLabel,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = gpsColor,
-                        maxLines = 1,
-                    )
-                }
+                TripGpsBadge(speedStateFlow = speedStateFlow)
             }
 
-            // Grille 2x2 des statistiques de trajet
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -209,7 +193,6 @@ fun TripScreen(
                 }
             }
 
-            // Grand bouton Reset / Nouveau trajet
             Button(
                 onClick = onResetTrip,
                 colors = ButtonDefaults.buttonColors(
@@ -219,18 +202,49 @@ fun TripScreen(
                 shape = RoundedCornerShape(18.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(if (isCompactHeight) 50.dp else 58.dp)
+                    .height(if (isCompactHeight) 56.dp else 64.dp)
                     .testTag("trip_reset_btn"),
             ) {
-                Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(24.dp))
-                Spacer(Modifier.width(10.dp))
+                Icon(Icons.Rounded.RestartAlt, contentDescription = null, modifier = Modifier.size(26.dp))
+                Spacer(Modifier.width(12.dp))
                 Text(
                     text = "Reset / Nouveau trajet",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                    ),
                     maxLines = 1,
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun TripGpsBadge(speedStateFlow: StateFlow<SpeedGpsState>) {
+    val speedState by speedStateFlow.collectAsStateWithLifecycle()
+    val (gpsIcon, gpsLabel, gpsColor) = when {
+        !speedState.hasPermission -> Triple(Icons.Rounded.GpsOff, "GPS non autorisé", AmberWarn)
+        !speedState.isGpsEnabled -> Triple(Icons.Rounded.GpsOff, "GPS désactivé", AmberWarn)
+        !speedState.hasSignalFix -> Triple(Icons.Rounded.GpsNotFixed, "Recherche GPS...", TextSecondary)
+        else -> Triple(Icons.Rounded.GpsFixed, "${speedState.speedKmh} km/h en direct", EmeraldOk)
+    }
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(CarbonSurface)
+            .border(1.dp, gpsColor.copy(alpha = 0.45f), RoundedCornerShape(50))
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Icon(gpsIcon, contentDescription = null, tint = gpsColor, modifier = Modifier.size(18.dp))
+        Text(
+            text = gpsLabel,
+            style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp),
+            color = gpsColor,
+            maxLines = 1,
+        )
     }
 }
 
@@ -241,7 +255,7 @@ private fun TripMetricCard(
     subtitle: String,
     icon: ImageVector,
     valueFontSize: TextUnit,
-    cardPad: androidx.compose.ui.unit.Dp,
+    cardPad: Dp,
     highlight: Boolean,
     modifier: Modifier = Modifier,
 ) {
@@ -269,7 +283,10 @@ private fun TripMetricCard(
         ) {
             Text(
                 text = title,
-                style = MaterialTheme.typography.labelLarge,
+                style = MaterialTheme.typography.labelLarge.copy(
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                ),
                 color = accent,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -279,7 +296,7 @@ private fun TripMetricCard(
                 imageVector = icon,
                 contentDescription = null,
                 tint = if (highlight) primary else TextSecondary,
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(26.dp),
             )
         }
 
@@ -298,7 +315,7 @@ private fun TripMetricCard(
 
         Text(
             text = subtitle,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
             color = TextSecondary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

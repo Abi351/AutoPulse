@@ -291,7 +291,7 @@ class PreferencesRepository(private val context: Context) {
 
             val eqArray = obj.optJSONArray("eqCustomBandsMb")
             val eqBands = if (eqArray != null) {
-                List(5) { idx -> eqArray.optInt(idx, 0).coerceIn(-1200, 1200) }
+                List(5) { idx -> eqArray.optInt(idx, 0).coerceIn(-1500, 1500) }
             } else {
                 listOf(0, 0, 0, 0, 0)
             }
@@ -364,13 +364,13 @@ class PreferencesRepository(private val context: Context) {
 
         fun parseEqBands(raw: String?): List<Int> {
             if (raw.isNullOrBlank()) return listOf(0, 0, 0, 0, 0)
-            val parsed = raw.split(",").mapNotNull { it.trim().toIntOrNull()?.coerceIn(-1200, 1200) }
+            val parsed = raw.split(",").mapNotNull { it.trim().toIntOrNull()?.coerceIn(-1500, 1500) }
             return normalizeEqBands(parsed)
         }
 
         fun normalizeEqBands(bandsMb: List<Int>): List<Int> {
             return List(5) { idx ->
-                bandsMb.getOrElse(idx) { 0 }.coerceIn(-1200, 1200)
+                bandsMb.getOrElse(idx) { 0 }.coerceIn(-1500, 1500)
             }
         }
 

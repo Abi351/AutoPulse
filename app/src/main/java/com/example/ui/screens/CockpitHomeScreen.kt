@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -41,6 +42,7 @@ import androidx.compose.material.icons.rounded.GpsNotFixed
 import androidx.compose.material.icons.rounded.GpsOff
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Radio
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Tune
@@ -74,11 +76,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.HeadUnitSettings
 import com.example.data.MAX_DOCK_APPS
@@ -91,6 +95,7 @@ import com.example.hardware.AutoSpeedLimitState
 import com.example.hardware.InstalledAppInfo
 import com.example.hardware.MediaPlayerState
 import com.example.hardware.SpeedGpsState
+import com.example.hardware.UniversalMediaManager
 import com.example.ui.components.LightweightEqualizerBars
 import com.example.ui.components.SpeedSettingsModal
 import com.example.ui.theme.AmberWarn
@@ -104,6 +109,7 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -123,10 +129,10 @@ fun formatShortFrenchDate(date: Date): String {
 
 @Composable
 fun CockpitHomeScreen(
-    mediaState: MediaPlayerState,
-    speedState: SpeedGpsState,
+    mediaStateFlow: StateFlow<MediaPlayerState>,
+    speedStateFlow: StateFlow<SpeedGpsState>,
     settings: HeadUnitSettings,
-    autoSpeedLimitState: AutoSpeedLimitState = AutoSpeedLimitState(),
+    autoSpeedLimitStateFlow: StateFlow<AutoSpeedLimitState>,
     showBreakReminder: Boolean = false,
     dockApps: List<InstalledAppInfo>,
     getCachedIcon: (String) -> ImageBitmap?,
@@ -150,48 +156,32 @@ fun CockpitHomeScreen(
     onRemoveDockApp: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var clockStr by remember { mutableStateOf("") }
-    var secondsStr by remember { mutableStateOf("") }
-    var dateStr by remember { mutableStateOf("") }
     var editDockMode by remember { mutableStateOf(false) }
     var showSpeedSettingsModal by remember { mutableStateOf(false) }
 
-    LaunchedEffect(Unit) {
-        val timeFmt = SimpleDateFormat("HH:mm", Locale.FRANCE)
-        val secFmt = SimpleDateFormat("ss", Locale.FRANCE)
-        while (true) {
-            val now = Date()
-            clockStr = timeFmt.format(now)
-            secondsStr = secFmt.format(now)
-            dateStr = formatShortFrenchDate(now)
-            delay(1_000L)
-        }
-    }
-
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        val isCompactHeight = maxHeight < 430.dp
-        val isMediumHeight = maxHeight in 430.dp..560.dp
+        val isCompactHeight = maxHeight < 450.dp
+        val isMediumHeight = maxHeight in 450.dp..570.dp
         val isWide = maxWidth >= 820.dp
 
-        val outerHPad = if (isWide) 18.dp else 12.dp
+        val outerHPad = if (isWide) 18.dp else 14.dp
         val outerVPad = if (isCompactHeight) 8.dp else 12.dp
         val sectionGap = if (isCompactHeight) 8.dp else 12.dp
 
         val clockFontSize = when {
-            isCompactHeight -> 40.sp
-            isMediumHeight -> 48.sp
-            else -> 58.sp
+            isCompactHeight -> 56.sp
+            isMediumHeight -> 58.sp
+            else -> 62.sp
         }
         val speedFontSize = when {
-            isCompactHeight -> 48.sp
-            isMediumHeight -> 62.sp
+            isCompactHeight -> 68.sp
+            isMediumHeight -> 72.sp
             else -> 76.sp
         }
         val cardPad = if (isCompactHeight) 14.dp else if (isMediumHeight) 18.dp else 22.dp
-        val artSize = if (isCompactHeight) 62.dp else if (isMediumHeight) 74.dp else 88.dp
-        val dockHeight = if (isCompactHeight) 74.dp else 88.dp
-        val dockTileSize = if (isCompactHeight) 58.dp else 68.dp
-        val dockIconSize = if (isCompactHeight) 42.dp else 50.dp
+        val dockHeight = if (isCompactHeight) 76.dp else 80.dp
+        val dockTileSize = if (isCompactHeight) 62.dp else 66.dp
+        val dockIconSize = if (isCompactHeight) 52.dp else 56.dp
 
         Column(
             modifier = Modifier
@@ -210,12 +200,9 @@ fun CockpitHomeScreen(
                 horizontalArrangement = Arrangement.spacedBy(if (isWide) 16.dp else 12.dp),
             ) {
                 ClockAndSpeedDashboardCard(
-                    clockStr = clockStr,
-                    secondsStr = secondsStr,
-                    dateStr = dateStr,
-                    speedState = speedState,
+                    speedStateFlow = speedStateFlow,
                     settings = settings,
-                    autoSpeedLimitState = autoSpeedLimitState,
+                    autoSpeedLimitStateFlow = autoSpeedLimitStateFlow,
                     clockFontSize = clockFontSize,
                     speedFontSize = speedFontSize,
                     cardPad = cardPad,
@@ -224,14 +211,13 @@ fun CockpitHomeScreen(
                     onTriggerSpeedAlertDucking = onTriggerSpeedAlertDucking,
                     onRequestLocationPermission = onRequestLocationPermission,
                     modifier = Modifier
-                        .weight(0.95f)
+                        .weight(0.96f)
                         .fillMaxHeight(),
                 )
 
                 MediaDashboardCard(
-                    mediaState = mediaState,
+                    mediaStateFlow = mediaStateFlow,
                     cardPad = cardPad,
-                    artSize = artSize,
                     isCompactHeight = isCompactHeight,
                     onOpenMedia = onOpenMedia,
                     onTogglePlayPause = onTogglePlayPause,
@@ -239,7 +225,7 @@ fun CockpitHomeScreen(
                     onPrevTrack = onPrevTrack,
                     onSwitchAudioSource = onSwitchAudioSource,
                     modifier = Modifier
-                        .weight(1.05f)
+                        .weight(1.04f)
                         .fillMaxHeight(),
                 )
             }
@@ -261,6 +247,8 @@ fun CockpitHomeScreen(
     }
 
     if (showSpeedSettingsModal) {
+        val speedState by speedStateFlow.collectAsStateWithLifecycle()
+        val autoSpeedLimitState by autoSpeedLimitStateFlow.collectAsStateWithLifecycle()
         SpeedSettingsModal(
             settings = settings,
             speedState = speedState,
@@ -284,7 +272,7 @@ private fun BreakReminderBanner(onDismiss: () -> Unit) {
             .clip(RoundedCornerShape(16.dp))
             .background(AmberWarn.copy(alpha = 0.16f))
             .border(1.dp, AmberWarn.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
-            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .padding(horizontal = 16.dp, vertical = 10.dp)
             .testTag("cockpit_break_reminder_banner"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -293,11 +281,11 @@ private fun BreakReminderBanner(onDismiss: () -> Unit) {
             imageVector = Icons.Rounded.Coffee,
             contentDescription = "Pause conduite",
             tint = AmberWarn,
-            modifier = Modifier.size(20.dp),
+            modifier = Modifier.size(24.dp),
         )
         Text(
             text = "2h de conduite continue — Pensez à faire une pause",
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
             color = TextPrimary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -307,19 +295,102 @@ private fun BreakReminderBanner(onDismiss: () -> Unit) {
             onClick = onDismiss,
             modifier = Modifier.testTag("cockpit_break_reminder_dismiss_btn"),
         ) {
-            Text("Compris", color = AmberWarn, fontWeight = FontWeight.Bold)
+            Text("Compris", color = AmberWarn, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+        }
+    }
+}
+
+/**
+ * Composant horloge isolé : son tic chaque seconde ne recomposera jamais la carte média, le dock ou le compteur GPS.
+ */
+@Composable
+private fun IsolatedClockDisplay(
+    clockFontSize: TextUnit,
+    modifier: Modifier = Modifier,
+) {
+    var clockStr by remember { mutableStateOf("") }
+    var secondsStr by remember { mutableStateOf("") }
+    var dateStr by remember { mutableStateOf("") }
+
+    LaunchedEffect(Unit) {
+        val timeFmt = SimpleDateFormat("HH:mm", Locale.FRANCE)
+        val secFmt = SimpleDateFormat("ss", Locale.FRANCE)
+        while (true) {
+            val now = Date()
+            clockStr = timeFmt.format(now)
+            secondsStr = secFmt.format(now)
+            dateStr = formatShortFrenchDate(now)
+            delay(1_000L)
+        }
+    }
+
+    val primary = MaterialTheme.colorScheme.primary
+
+    BoxWithConstraints(
+        modifier = modifier,
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        val maxSafeClockSp = ((maxWidth.value - 42f).coerceAtLeast(62f) / 3.25f)
+        val effectiveClockSize = minOf(clockFontSize.value, maxSafeClockSp)
+            .coerceIn(24f, 62f)
+            .sp
+
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Row(
+                verticalAlignment = Alignment.Bottom,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = clockStr,
+                    style = MaterialTheme.typography.displayLarge.copy(
+                        fontSize = effectiveClockSize,
+                        lineHeight = effectiveClockSize * 1.04f,
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.Bold,
+                    ),
+                    color = TextPrimary,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+                Text(
+                    text = secondsStr,
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontSize = 24.sp,
+                        lineHeight = 26.sp,
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.Bold,
+                    ),
+                    color = primary,
+                    maxLines = 1,
+                    softWrap = false,
+                    modifier = Modifier
+                        .widthIn(min = 34.dp)
+                        .padding(bottom = 7.dp),
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = dateStr,
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                ),
+                color = TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
 
 @Composable
 private fun ClockAndSpeedDashboardCard(
-    clockStr: String,
-    secondsStr: String,
-    dateStr: String,
-    speedState: SpeedGpsState,
+    speedStateFlow: StateFlow<SpeedGpsState>,
     settings: HeadUnitSettings,
-    autoSpeedLimitState: AutoSpeedLimitState,
+    autoSpeedLimitStateFlow: StateFlow<AutoSpeedLimitState>,
     clockFontSize: TextUnit,
     speedFontSize: TextUnit,
     cardPad: Dp,
@@ -329,6 +400,138 @@ private fun ClockAndSpeedDashboardCard(
     onRequestLocationPermission: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val primary = MaterialTheme.colorScheme.primary
+
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(26.dp))
+            .background(
+                Brush.verticalGradient(listOf(CarbonSurfaceElevated, CarbonSurface))
+            )
+            .border(
+                width = 1.dp,
+                color = CarbonBorder,
+                shape = RoundedCornerShape(26.dp),
+            )
+            .padding(cardPad),
+        verticalArrangement = Arrangement.SpaceBetween,
+    ) {
+        IsolatedDashboardHeader(
+            speedStateFlow = speedStateFlow,
+            settings = settings,
+            autoSpeedLimitStateFlow = autoSpeedLimitStateFlow,
+            onRequestLocationPermission = onRequestLocationPermission,
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            IsolatedClockDisplay(
+                clockFontSize = clockFontSize,
+                modifier = Modifier.weight(1.06f),
+            )
+
+            Box(
+                modifier = Modifier
+                    .width(1.dp)
+                    .height(if (isCompactHeight) 96.dp else 124.dp)
+                    .background(CarbonBorder),
+            )
+
+            IsolatedSpeedometerZone(
+                speedStateFlow = speedStateFlow,
+                settings = settings,
+                autoSpeedLimitStateFlow = autoSpeedLimitStateFlow,
+                speedFontSize = speedFontSize,
+                onOpenSpeedSettings = onOpenSpeedSettings,
+                onTriggerSpeedAlertDucking = onTriggerSpeedAlertDucking,
+                modifier = Modifier
+                    .weight(0.94f)
+                    .fillMaxHeight(),
+            )
+        }
+    }
+}
+
+@Composable
+private fun IsolatedDashboardHeader(
+    speedStateFlow: StateFlow<SpeedGpsState>,
+    settings: HeadUnitSettings,
+    autoSpeedLimitStateFlow: StateFlow<AutoSpeedLimitState>,
+    onRequestLocationPermission: () -> Unit,
+) {
+    val speedState by speedStateFlow.collectAsStateWithLifecycle()
+    val autoSpeedLimitState by autoSpeedLimitStateFlow.collectAsStateWithLifecycle()
+
+    val primary = MaterialTheme.colorScheme.primary
+    val accent = MaterialTheme.colorScheme.secondary
+
+    val isAutoMode = settings.speedLimitKmh == SPEED_LIMIT_AUTO
+    val activeLimitKmh = if (isAutoMode) {
+        autoSpeedLimitState.detectedLimitKmh ?: 0
+    } else {
+        settings.speedLimitKmh
+    }
+    val isOverSpeedLimit = PreferencesRepository.isSpeedOverLimit(
+        speedKmh = speedState.speedKmh,
+        activeLimitKmh = activeLimitKmh,
+        toleranceKmh = settings.speedAlertToleranceKmh,
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.weight(1f),
+        ) {
+            Box(
+                modifier = Modifier
+                    .width(26.dp)
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(if (isOverSpeedLimit) CrimsonAlert else primary),
+            )
+            Text(
+                text = if (isOverSpeedLimit) {
+                    "ALERTE LIMITE $activeLimitKmh (+${settings.speedAlertToleranceKmh})"
+                } else {
+                    "TABLEAU DE BORD"
+                },
+                style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp),
+                color = if (isOverSpeedLimit) CrimsonAlert else accent,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+
+        GpsStatusIndicator(
+            speedState = speedState,
+            onRequestLocationPermission = onRequestLocationPermission,
+        )
+    }
+}
+
+@Composable
+private fun IsolatedSpeedometerZone(
+    speedStateFlow: StateFlow<SpeedGpsState>,
+    settings: HeadUnitSettings,
+    autoSpeedLimitStateFlow: StateFlow<AutoSpeedLimitState>,
+    speedFontSize: TextUnit,
+    onOpenSpeedSettings: () -> Unit,
+    onTriggerSpeedAlertDucking: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val speedState by speedStateFlow.collectAsStateWithLifecycle()
+    val autoSpeedLimitState by autoSpeedLimitStateFlow.collectAsStateWithLifecycle()
+
     val primary = MaterialTheme.colorScheme.primary
     val accent = MaterialTheme.colorScheme.secondary
     val container = MaterialTheme.colorScheme.primaryContainer
@@ -387,246 +590,125 @@ private fun ClockAndSpeedDashboardCard(
 
     Column(
         modifier = modifier
-            .clip(RoundedCornerShape(26.dp))
-            .background(
-                Brush.verticalGradient(listOf(CarbonSurfaceElevated, CarbonSurface))
-            )
-            .border(
-                width = if (isOverSpeedLimit) 1.5.dp else 1.dp,
-                color = if (isOverSpeedLimit) speedDisplayColor else CarbonBorder,
-                shape = RoundedCornerShape(26.dp),
-            )
-            .padding(cardPad),
-        verticalArrangement = Arrangement.SpaceBetween,
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(onClick = onOpenSpeedSettings)
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .testTag("cockpit_speedometer"),
+        horizontalAlignment = Alignment.End,
+        verticalArrangement = Arrangement.Center,
     ) {
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .width(24.dp)
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(primary),
-                )
-                Text(
-                    text = if (isOverSpeedLimit) {
-                        "ALERTE LIMITE $activeLimitKmh (+${settings.speedAlertToleranceKmh})"
-                    } else {
-                        "TABLEAU DE BORD"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                    color = if (isOverSpeedLimit) speedDisplayColor else accent,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-
-            GpsStatusIndicator(
-                speedState = speedState,
-                onRequestLocationPermission = onRequestLocationPermission,
+            Text(
+                text = "${speedState.speedKmh}",
+                style = MaterialTheme.typography.displayLarge.copy(
+                    fontSize = speedFontSize,
+                    lineHeight = speedFontSize * 1.02f,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontWeight = FontWeight.Bold,
+                ),
+                color = speedDisplayColor,
+                maxLines = 1,
+            )
+            Text(
+                text = "km/h",
+                style = MaterialTheme.typography.titleMedium.copy(
+                    fontSize = 20.sp,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontWeight = FontWeight.SemiBold,
+                ),
+                color = if (isOverSpeedLimit) speedDisplayColor else accent,
+                modifier = Modifier.padding(bottom = 10.dp),
+                maxLines = 1,
             )
         }
 
+        Spacer(Modifier.height(10.dp))
+
+        val badgeText = when {
+            isAutoMode && activeLimitKmh > 0 -> "Auto • $activeLimitKmh km/h"
+            isAutoMode -> "Auto • attente"
+            activeLimitKmh > 0 -> "Limite • $activeLimitKmh km/h"
+            else -> "Limite • Off"
+        }
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    when {
+                        isOverSpeedLimit -> CrimsonAlert.copy(alpha = 0.22f)
+                        activeLimitKmh > 0 -> container.copy(alpha = 0.72f)
+                        else -> CarbonSurface
+                    }
+                )
+                .border(
+                    1.dp,
+                    when {
+                        isOverSpeedLimit -> speedDisplayColor
+                        activeLimitKmh > 0 -> primary.copy(alpha = 0.65f)
+                        else -> CarbonBorder
+                    },
+                    RoundedCornerShape(12.dp),
+                )
+                .padding(horizontal = 12.dp, vertical = 7.dp)
+                .testTag("cockpit_active_limit_badge"),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            // Bloc Horloge
-            BoxWithConstraints(
-                modifier = Modifier.weight(1.06f),
-                contentAlignment = Alignment.CenterStart,
-            ) {
-                val maxSafeClockSp = ((maxWidth.value - 38f).coerceAtLeast(62f) / 3.15f)
-                val effectiveClockSize = minOf(clockFontSize.value, maxSafeClockSp)
-                    .coerceIn(22f, 58f)
-                    .sp
-
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.Center,
-                ) {
-                    Row(
-                        verticalAlignment = Alignment.Bottom,
-                        horizontalArrangement = Arrangement.spacedBy(5.dp),
-                    ) {
-                        Text(
-                            text = clockStr,
-                            style = MaterialTheme.typography.displayLarge.copy(
-                                fontSize = effectiveClockSize,
-                                lineHeight = effectiveClockSize * 1.04f,
-                                fontFamily = JetBrainsMonoFamily,
-                                fontWeight = FontWeight.Bold,
-                            ),
-                            color = TextPrimary,
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                        Text(
-                            text = secondsStr,
-                            style = MaterialTheme.typography.titleLarge.copy(
-                                fontFamily = JetBrainsMonoFamily,
-                            ),
-                            color = primary,
-                            maxLines = 1,
-                            softWrap = false,
-                            modifier = Modifier
-                                .widthIn(min = 32.dp)
-                                .padding(bottom = 6.dp),
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Text(
-                        text = dateStr,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = TextSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .width(1.dp)
-                    .height(if (isCompactHeight) 82.dp else 108.dp)
-                    .background(CarbonBorder),
+            Text(
+                text = badgeText,
+                style = MaterialTheme.typography.labelLarge.copy(
+                    fontSize = 14.sp,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontWeight = FontWeight.SemiBold,
+                ),
+                color = when {
+                    isOverSpeedLimit -> speedDisplayColor
+                    activeLimitKmh > 0 -> accent
+                    else -> TextSecondary
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
+            Icon(
+                imageVector = Icons.Rounded.Tune,
+                contentDescription = "Réglages compteur",
+                tint = if (isOverSpeedLimit) speedDisplayColor else TextSecondary,
+                modifier = Modifier.size(16.dp),
+            )
+        }
 
-            // Zone Compteur GPS (cliquable pour ouvrir le menu dédié "Compteur & Alertes Vitesse")
-            Column(
+        if (isAutoMode && autoSpeedLimitState.isCountdownVisible) {
+            Spacer(Modifier.height(10.dp))
+            Row(
                 modifier = Modifier
-                    .weight(0.94f)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(18.dp))
-                    .clickable(onClick = onOpenSpeedSettings)
-                    .padding(horizontal = 8.dp, vertical = 6.dp)
-                    .testTag("cockpit_speedometer"),
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.Center,
+                    .fillMaxWidth()
+                    .testTag("auto_speed_limit_progress_row"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Row(
-                    verticalAlignment = Alignment.Bottom,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Text(
-                        text = "${speedState.speedKmh}",
-                        style = MaterialTheme.typography.displayLarge.copy(
-                            fontSize = speedFontSize,
-                            lineHeight = speedFontSize * 1.02f,
-                            fontFamily = JetBrainsMonoFamily,
-                            fontWeight = FontWeight.Bold,
-                        ),
-                        color = speedDisplayColor,
-                        maxLines = 1,
-                    )
-                    Text(
-                        text = "km/h",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontFamily = JetBrainsMonoFamily,
-                            fontWeight = FontWeight.SemiBold,
-                        ),
-                        color = if (isOverSpeedLimit) speedDisplayColor else accent,
-                        modifier = Modifier.padding(bottom = 8.dp),
-                        maxLines = 1,
-                    )
-                }
-
-                Spacer(Modifier.height(6.dp))
-
-                val badgeText = when {
-                    isAutoMode && activeLimitKmh > 0 -> "Auto • $activeLimitKmh km/h"
-                    isAutoMode -> "Auto • attente"
-                    activeLimitKmh > 0 -> "Limite • $activeLimitKmh km/h"
-                    else -> "Limite • Off"
-                }
-                Row(
+                LinearProgressIndicator(
+                    progress = { autoSpeedLimitState.progressFraction },
+                    color = primary,
+                    trackColor = CarbonBorder,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(
-                            when {
-                                isOverSpeedLimit -> CrimsonAlert.copy(alpha = 0.22f)
-                                activeLimitKmh > 0 -> container.copy(alpha = 0.72f)
-                                else -> CarbonSurface
-                            }
-                        )
-                        .border(
-                            1.dp,
-                            when {
-                                isOverSpeedLimit -> speedDisplayColor
-                                activeLimitKmh > 0 -> primary.copy(alpha = 0.65f)
-                                else -> CarbonBorder
-                            },
-                            RoundedCornerShape(10.dp),
-                        )
-                        .padding(horizontal = 10.dp, vertical = 5.dp)
-                        .testTag("cockpit_active_limit_badge"),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
-                ) {
-                    Text(
-                        text = badgeText,
-                        style = MaterialTheme.typography.labelMedium.copy(
-                            fontFamily = JetBrainsMonoFamily,
-                            fontWeight = FontWeight.SemiBold,
-                        ),
-                        color = when {
-                            isOverSpeedLimit -> speedDisplayColor
-                            activeLimitKmh > 0 -> accent
-                            else -> TextSecondary
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Icon(
-                        imageVector = Icons.Rounded.Tune,
-                        contentDescription = "Réglages compteur",
-                        tint = if (isOverSpeedLimit) speedDisplayColor else TextSecondary,
-                        modifier = Modifier.size(13.dp),
-                    )
-                }
-
-                // Phase 2 : petite barre de progression fine + mini chrono uniquement pendant détection active
-                if (isAutoMode && autoSpeedLimitState.isCountdownVisible) {
-                    Spacer(Modifier.height(8.dp))
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag("auto_speed_limit_progress_row"),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        LinearProgressIndicator(
-                            progress = { autoSpeedLimitState.progressFraction },
-                            color = primary,
-                            trackColor = CarbonBorder,
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(4.dp)
-                                .clip(RoundedCornerShape(50)),
-                        )
-                        Text(
-                            text = "${autoSpeedLimitState.countdownSeconds}s/${autoSpeedLimitState.countdownTotalSeconds}s",
-                            style = MaterialTheme.typography.labelSmall.copy(
-                                fontFamily = JetBrainsMonoFamily,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 11.sp,
-                            ),
-                            color = accent,
-                            maxLines = 1,
-                            modifier = Modifier.testTag("auto_speed_limit_chrono"),
-                        )
-                    }
-                }
+                        .weight(1f)
+                        .height(5.dp)
+                        .clip(RoundedCornerShape(50)),
+                )
+                Text(
+                    text = "${autoSpeedLimitState.countdownSeconds}s/${autoSpeedLimitState.countdownTotalSeconds}s",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = JetBrainsMonoFamily,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp,
+                    ),
+                    color = accent,
+                    maxLines = 1,
+                    modifier = Modifier.testTag("auto_speed_limit_chrono"),
+                )
             }
         }
     }
@@ -653,15 +735,15 @@ private fun GpsStatusIndicator(
                 if (!speedState.hasPermission) Modifier.clickable(onClick = onRequestLocationPermission)
                 else Modifier
             )
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
             .testTag("cockpit_gps_status"),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        Icon(icon, contentDescription = text, tint = color, modifier = Modifier.size(13.dp))
+        Icon(icon, contentDescription = text, tint = color, modifier = Modifier.size(15.dp))
         Text(
             text = text,
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp),
             color = color,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -671,9 +753,8 @@ private fun GpsStatusIndicator(
 
 @Composable
 private fun MediaDashboardCard(
-    mediaState: MediaPlayerState,
+    mediaStateFlow: StateFlow<MediaPlayerState>,
     cardPad: Dp,
-    artSize: Dp,
     isCompactHeight: Boolean,
     onOpenMedia: () -> Unit,
     onTogglePlayPause: () -> Unit,
@@ -682,9 +763,14 @@ private fun MediaDashboardCard(
     onSwitchAudioSource: (AudioSourceMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val mediaState by mediaStateFlow.collectAsStateWithLifecycle()
+
     val primary = MaterialTheme.colorScheme.primary
+    val accent = MaterialTheme.colorScheme.secondary
+    val container = MaterialTheme.colorScheme.primaryContainer
     val isExternal = mediaState.sourceMode == AudioSourceMode.EXTERNAL
     val ext = mediaState.externalMedia
+    val isFmActive = isExternal && ext.isFmRadio
 
     val playing = if (isExternal) {
         if (ext.hasActiveSession) ext.isPlaying else mediaState.btAudioActive
@@ -698,11 +784,21 @@ private fun MediaDashboardCard(
         label = "play_scale",
     )
 
+    val cleanBtName = UniversalMediaManager.sanitizeMediaText(mediaState.connectedBtDevice?.name)
+    val cleanExtTitle = UniversalMediaManager.sanitizeMediaText(ext.title)
+    val cleanExtArtist = UniversalMediaManager.sanitizeMediaText(ext.artist)
+    val cleanExtApp = UniversalMediaManager.sanitizeMediaText(ext.appName)
+
     val titleText = if (isExternal) {
         when {
-            ext.hasActiveSession -> ext.title
-            mediaState.connectedBtDevice != null -> mediaState.connectedBtDevice.name
-            else -> "Audio Externe / BT"
+            isFmActive -> {
+                ext.fmStationName.ifBlank {
+                    if (ext.fmFrequencyMhz.isNotBlank()) "${ext.fmFrequencyMhz} MHz" else "Radio FM"
+                }
+            }
+            ext.hasActiveSession && cleanExtTitle.isNotBlank() -> cleanExtTitle
+            cleanBtName.isNotBlank() -> cleanBtName
+            else -> "Audio Externe • BT • FM"
         }
     } else {
         mediaState.currentTrack?.title ?: "Aucune musique en cours"
@@ -710,10 +806,12 @@ private fun MediaDashboardCard(
 
     val subtitleText = if (isExternal) {
         when {
-            ext.hasActiveSession -> "${ext.artist} • ${ext.appName}"
-            mediaState.connectedBtDevice != null -> "Bluetooth A2DP • AVRCP"
+            isFmActive -> UniversalMediaManager.buildFmSubtitle(ext.fmFrequencyMhz, ext.fmRdsText)
+            ext.hasActiveSession -> listOf(cleanExtArtist, cleanExtApp).filter { it.isNotBlank() }.joinToString(" • ")
+                .ifBlank { "Lecture Bluetooth / Externe" }
+            cleanBtName.isNotBlank() -> "Bluetooth A2DP • AVRCP"
             !mediaState.hasNotificationListenerAccess -> "Activez l'accès média dans Réglages"
-            else -> "Lancez Spotify, YouTube Music ou connectez un BT"
+            else -> "Lancez Spotify, Radio FM ou connectez un BT"
         }
     } else {
         val track = mediaState.currentTrack
@@ -737,8 +835,6 @@ private fun MediaDashboardCard(
     val displayPos = if (isExternal) ext.positionMs else mediaState.positionMs
     val displayDur = if (isExternal) ext.durationMs else mediaState.durationMs
 
-    val controlBtnSize = if (isCompactHeight) 46.dp else 54.dp
-    val playControlSize = if (isCompactHeight) 54.dp else 64.dp
     val swipeThresholdPx = with(LocalDensity.current) { 60.dp.toPx() }
     var artDragX by remember(mediaState.currentTrack?.id, ext.title) { mutableFloatStateOf(0f) }
     val animatedArtOffset by animateFloatAsState(
@@ -747,7 +843,7 @@ private fun MediaDashboardCard(
         label = "cockpit_art_drag_offset",
     )
 
-    Column(
+    BoxWithConstraints(
         modifier = modifier
             .clip(RoundedCornerShape(26.dp))
             .background(CarbonSurfaceElevated)
@@ -759,40 +855,55 @@ private fun MediaDashboardCard(
             .clickable(onClick = onOpenMedia)
             .padding(cardPad)
             .testTag("cockpit_media_card"),
-        verticalArrangement = Arrangement.SpaceBetween,
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            SourcePill(
-                icon = Icons.Rounded.FolderOpen,
-                label = "Stockage Local",
-                selected = !isExternal,
-                onClick = { onSwitchAudioSource(AudioSourceMode.LOCAL) },
-                modifier = Modifier.weight(1f),
-                testTag = "cockpit_source_local",
-            )
-            SourcePill(
-                icon = Icons.Rounded.Bluetooth,
-                label = if (ext.hasActiveSession) ext.appName.take(14) else "Externe / BT",
-                selected = isExternal,
-                onClick = { onSwitchAudioSource(AudioSourceMode.EXTERNAL) },
-                modifier = Modifier.weight(1f),
-                testTag = "cockpit_source_bt",
-            )
+        // Dimensionnement adaptatif de la pochette centrée (130.dp à 150.dp) selon la hauteur disponible
+        val artSize = when {
+            maxHeight < 340.dp -> 112.dp
+            isCompactHeight || maxHeight < 420.dp -> 130.dp
+            else -> 148.dp
         }
+        val controlBtnSize = if (isCompactHeight) 48.dp else 52.dp
+        val playControlSize = 60.dp
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-            modifier = Modifier.fillMaxWidth(),
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.SpaceBetween,
         ) {
+            // 1. Haut : deux boutons compacts de sélection de source
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SourcePill(
+                    icon = Icons.Rounded.FolderOpen,
+                    label = "Stockage Local",
+                    selected = !isExternal,
+                    onClick = { onSwitchAudioSource(AudioSourceMode.LOCAL) },
+                    modifier = Modifier.weight(1f),
+                    testTag = "cockpit_source_local",
+                )
+                SourcePill(
+                    icon = if (isFmActive) Icons.Rounded.Radio else Icons.Rounded.Bluetooth,
+                    label = when {
+                        isFmActive -> "Radio FM"
+                        ext.hasActiveSession && cleanExtApp.isNotBlank() -> cleanExtApp.take(16)
+                        else -> "Externe • BT • FM"
+                    },
+                    selected = isExternal,
+                    onClick = { onSwitchAudioSource(AudioSourceMode.EXTERNAL) },
+                    modifier = Modifier.weight(1f),
+                    testTag = "cockpit_source_bt",
+                )
+            }
+
+            // 2. Centre-haut : grande pochette carrée centrée aux coins arrondis avec swipe horizontal
             Box(
                 modifier = Modifier
                     .size(artSize)
-                    .clip(RoundedCornerShape(18.dp))
+                    .clip(RoundedCornerShape(20.dp))
+                    .border(1.dp, CarbonBorder, RoundedCornerShape(20.dp))
                     .pointerInput(mediaState.currentTrack?.id, isExternal) {
                         detectHorizontalDragGestures(
                             onDragStart = { artDragX = 0f },
@@ -817,7 +928,7 @@ private fun MediaDashboardCard(
                 val artModifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer { translationX = animatedArtOffset }
-                    .clip(RoundedCornerShape(18.dp))
+                    .clip(RoundedCornerShape(20.dp))
                 if (activeArtBitmap != null) {
                     Image(
                         bitmap = activeArtBitmap,
@@ -835,42 +946,96 @@ private fun MediaDashboardCard(
                 }
             }
 
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            // 3. Milieu (centré) : badge Radio FM si actif + Titre gras 19sp (1 ligne, marquee) + Artiste / Sous-titre 14sp
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 6.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                if (isFmActive) {
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .background(container.copy(alpha = 0.85f))
+                            .border(1.dp, primary.copy(alpha = 0.7f), RoundedCornerShape(50))
+                            .padding(horizontal = 10.dp, vertical = 3.dp)
+                            .testTag("cockpit_fm_radio_badge"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Radio,
+                            contentDescription = "Radio FM",
+                            tint = accent,
+                            modifier = Modifier.size(14.dp),
+                        )
+                        Text(
+                            text = "Radio FM",
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                            ),
+                            color = accent,
+                            maxLines = 1,
+                        )
+                    }
+                }
+
                 Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(
                         text = titleText,
-                        style = MaterialTheme.typography.titleLarge,
+                        style = MaterialTheme.typography.titleLarge.copy(
+                            fontSize = 19.sp,
+                            fontWeight = FontWeight.Bold,
+                        ),
                         color = TextPrimary,
+                        textAlign = TextAlign.Center,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .basicMarquee(),
                     )
-                    LightweightEqualizerBars(isPlaying = playing)
+                    if (playing) {
+                        Spacer(Modifier.width(8.dp))
+                        LightweightEqualizerBars(isPlaying = true)
+                    }
                 }
 
                 Text(
                     text = subtitleText,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
                     color = TextSecondary,
+                    textAlign = TextAlign.Center,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
                 )
             }
-        }
 
-        if (displayDur > 0L) {
-            Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                val progress = (displayPos.toFloat() / displayDur.toFloat()).coerceIn(0f, 1f)
+            // 4. Bas-milieu : barre de progression pleine largeur avec temps écoulé à gauche et durée totale à droite
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                val progress = if (displayDur > 0L) {
+                    (displayPos.toFloat() / displayDur.toFloat()).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
                 LinearProgressIndicator(
                     progress = { progress },
                     color = primary,
                     trackColor = CarbonBorder,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(5.dp)
+                        .height(6.dp)
                         .clip(RoundedCornerShape(50)),
                 )
                 Row(
@@ -878,64 +1043,81 @@ private fun MediaDashboardCard(
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(
-                        text = AudioEngine.formatDuration(displayPos),
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                        text = if (displayDur > 0L) AudioEngine.formatDuration(displayPos) else if (isFmActive) "EN DIRECT" else "0:00",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontSize = 12.sp,
+                            fontFamily = JetBrainsMonoFamily,
+                        ),
                         color = TextSecondary,
                     )
                     Text(
-                        text = AudioEngine.formatDuration(displayDur),
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                        text = if (displayDur > 0L) AudioEngine.formatDuration(displayDur) else "--:--",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontSize = 12.sp,
+                            fontFamily = JetBrainsMonoFamily,
+                        ),
                         color = TextSecondary,
                     )
                 }
             }
-        }
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(
-                onClick = onPrevTrack,
-                modifier = Modifier
-                    .size(controlBtnSize)
-                    .clip(CircleShape)
-                    .background(CarbonSurface)
-                    .testTag("cockpit_media_prev"),
+            // 5. Bas (centré) : boutons de contrôle bien espacés (Précédent, Lecture/Pause 60.dp, Suivant)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Icons.Rounded.SkipPrevious, contentDescription = "Précédent", tint = TextPrimary, modifier = Modifier.size(28.dp))
-            }
+                IconButton(
+                    onClick = onPrevTrack,
+                    modifier = Modifier
+                        .size(controlBtnSize)
+                        .clip(CircleShape)
+                        .background(CarbonSurface)
+                        .testTag("cockpit_media_prev"),
+                ) {
+                    Icon(
+                        Icons.Rounded.SkipPrevious,
+                        contentDescription = "Précédent",
+                        tint = TextPrimary,
+                        modifier = Modifier.size(30.dp),
+                    )
+                }
 
-            IconButton(
-                onClick = onTogglePlayPause,
-                modifier = Modifier
-                    .size(playControlSize)
-                    .graphicsLayer {
-                        scaleX = playBtnScale
-                        scaleY = playBtnScale
-                    }
-                    .clip(CircleShape)
-                    .background(primary)
-                    .testTag("cockpit_media_play_pause"),
-            ) {
-                Icon(
-                    imageVector = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                    contentDescription = "Lecture / Pause",
-                    tint = MaterialTheme.colorScheme.onPrimary,
-                    modifier = Modifier.size(34.dp),
-                )
-            }
+                IconButton(
+                    onClick = onTogglePlayPause,
+                    modifier = Modifier
+                        .size(playControlSize)
+                        .graphicsLayer {
+                            scaleX = playBtnScale
+                            scaleY = playBtnScale
+                        }
+                        .clip(CircleShape)
+                        .background(primary)
+                        .testTag("cockpit_media_play_pause"),
+                ) {
+                    Icon(
+                        imageVector = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = "Lecture / Pause",
+                        tint = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(34.dp),
+                    )
+                }
 
-            IconButton(
-                onClick = onNextTrack,
-                modifier = Modifier
-                    .size(controlBtnSize)
-                    .clip(CircleShape)
-                    .background(CarbonSurface)
-                    .testTag("cockpit_media_next"),
-            ) {
-                Icon(Icons.Rounded.SkipNext, contentDescription = "Suivant", tint = TextPrimary, modifier = Modifier.size(28.dp))
+                IconButton(
+                    onClick = onNextTrack,
+                    modifier = Modifier
+                        .size(controlBtnSize)
+                        .clip(CircleShape)
+                        .background(CarbonSurface)
+                        .testTag("cockpit_media_next"),
+                ) {
+                    Icon(
+                        Icons.Rounded.SkipNext,
+                        contentDescription = "Suivant",
+                        tint = TextPrimary,
+                        modifier = Modifier.size(30.dp),
+                    )
+                }
             }
         }
     }
@@ -977,7 +1159,7 @@ private fun HeadUnitAppDock(
         Row(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -995,7 +1177,7 @@ private fun HeadUnitAppDock(
                     imageVector = Icons.Rounded.Apps,
                     contentDescription = "Bibliothèque d'applications",
                     tint = accent,
-                    modifier = Modifier.size(32.dp),
+                    modifier = Modifier.size(34.dp),
                 )
             }
 
@@ -1041,14 +1223,14 @@ private fun HeadUnitAppDock(
                                 contentDescription = app.label,
                                 modifier = Modifier
                                     .size(iconSize)
-                                    .clip(RoundedCornerShape(12.dp)),
+                                    .clip(RoundedCornerShape(14.dp)),
                             )
                         } else {
                             Icon(
                                 imageVector = Icons.Rounded.Apps,
                                 contentDescription = app.label,
                                 tint = accent,
-                                modifier = Modifier.size(34.dp),
+                                modifier = Modifier.size(36.dp),
                             )
                         }
 
@@ -1115,6 +1297,7 @@ private fun HeadUnitAppDock(
                 Text(
                     text = "AUTOPULSE",
                     style = MaterialTheme.typography.labelLarge.copy(
+                        fontSize = 14.sp,
                         letterSpacing = 1.4.sp,
                         fontWeight = FontWeight.Bold,
                     ),
@@ -1127,7 +1310,7 @@ private fun HeadUnitAppDock(
             IconButton(
                 onClick = onToggleEditMode,
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(50.dp)
                     .clip(CircleShape)
                     .background(if (editMode) AmberWarn.copy(alpha = 0.2f) else CarbonSurface)
                     .testTag("dock_edit_btn"),
@@ -1136,7 +1319,7 @@ private fun HeadUnitAppDock(
                     imageVector = Icons.Rounded.Edit,
                     contentDescription = "Modifier le dock",
                     tint = if (editMode) AmberWarn else TextSecondary,
-                    modifier = Modifier.size(22.dp),
+                    modifier = Modifier.size(24.dp),
                 )
             }
         }
@@ -1158,12 +1341,12 @@ private fun SourcePill(
 
     Row(
         modifier = modifier
-            .height(40.dp)
+            .height(42.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(if (selected) container else CarbonSurface)
             .border(1.dp, if (selected) primary else CarbonBorder, RoundedCornerShape(12.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp)
+            .padding(horizontal = 10.dp)
             .testTag(testTag),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
@@ -1172,12 +1355,12 @@ private fun SourcePill(
             imageVector = icon,
             contentDescription = null,
             tint = if (selected) accent else TextSecondary,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(18.dp),
         )
-        Spacer(Modifier.width(6.dp))
+        Spacer(Modifier.width(7.dp))
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp),
             color = if (selected) accent else TextSecondary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

@@ -89,10 +89,10 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
     private val _tripStats = MutableStateFlow(TripStats())
     val tripStats: StateFlow<TripStats> = _tripStats.asStateFlow()
 
-    private val _isDefaultLauncher = MutableStateFlow(appsManager.isDefaultHomeLauncher())
+    private val _isDefaultLauncher = MutableStateFlow(false)
     val isDefaultLauncher: StateFlow<Boolean> = _isDefaultLauncher.asStateFlow()
 
-    private val _hasOverlayPermission = MutableStateFlow(ScreenDimmerService.isOverlayPermissionGranted(application))
+    private val _hasOverlayPermission = MutableStateFlow(false)
     val hasOverlayPermission: StateFlow<Boolean> = _hasOverlayPermission.asStateFlow()
 
     private val _coverSyncState = MutableStateFlow(CoverSyncUiState())
@@ -128,6 +128,8 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
 
     init {
         refreshInstalledApps()
+        refreshLauncherStatus()
+        refreshOverlayPermission()
 
         tracks.onEach { list ->
             audioEngine.setPlaylist(list)
@@ -272,7 +274,9 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun refreshOverlayPermission() {
-        _hasOverlayPermission.value = ScreenDimmerService.isOverlayPermissionGranted(getApplication())
+        viewModelScope.launch(Dispatchers.IO) {
+            _hasOverlayPermission.value = ScreenDimmerService.isOverlayPermissionGranted(getApplication())
+        }
     }
 
     fun openOverlayPermissionSettings() {
@@ -280,7 +284,9 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun refreshLauncherStatus() {
-        _isDefaultLauncher.value = appsManager.isDefaultHomeLauncher()
+        viewModelScope.launch(Dispatchers.IO) {
+            _isDefaultLauncher.value = appsManager.isDefaultHomeLauncher()
+        }
     }
 
     fun openLauncherSettings() {
@@ -289,6 +295,12 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun openNotificationListenerSettings() {
         audioEngine.openNotificationListenerSettings()
+    }
+
+    fun openSystemDspEqualizer() {
+        if (!audioEngine.openSystemDspEqualizer()) {
+            postFeedback("Aucun égaliseur DSP système détecté — utilisez les bandes intégrées ci-dessus")
+        }
     }
 
     fun clearFeedback() {

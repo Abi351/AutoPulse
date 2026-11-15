@@ -20,6 +20,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
+import android.media.audiofx.AudioEffect
 import android.media.audiofx.Equalizer
 import android.net.Uri
 import android.os.Build
@@ -83,6 +84,8 @@ data class EqBandState(
     val maxMb: Short,
 )
 
+private const val EQ_MIN_MB = -1500
+private const val EQ_MAX_MB = 1500
 private val DEFAULT_BAND_FREQS_HZ = listOf(60, 230, 910, 3600, 14000)
 
 private fun buildDefaultEqBands(gainsMb: List<Int> = listOf(0, 0, 0, 0, 0)): List<EqBandState> {
@@ -90,9 +93,9 @@ private fun buildDefaultEqBands(gainsMb: List<Int> = listOf(0, 0, 0, 0, 0)): Lis
         EqBandState(
             index = idx.toShort(),
             centerFreqHz = freqHz,
-            levelMb = gainsMb.getOrElse(idx) { 0 }.coerceIn(-1200, 1200).toShort(),
-            minMb = (-1200).toShort(),
-            maxMb = 1200.toShort(),
+            levelMb = gainsMb.getOrElse(idx) { 0 }.coerceIn(EQ_MIN_MB, EQ_MAX_MB).toShort(),
+            minMb = EQ_MIN_MB.toShort(),
+            maxMb = EQ_MAX_MB.toShort(),
         )
     }
 }
@@ -292,10 +295,6 @@ class AudioEngine(private val context: Context) {
             )
         }
 
-        runCatching {
-            bluetoothAdapter?.getProfileProxy(context, a2dpServiceListener, BluetoothProfile.A2DP)
-        }
-
         scope.launch {
             universalMedia.hasNotificationAccess.collect { granted ->
                 _state.update { it.copy(hasNotificationListenerAccess = granted) }
@@ -314,8 +313,13 @@ class AudioEngine(private val context: Context) {
             }
         }
 
-        refreshVolume()
-        refreshBluetoothDevices()
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                bluetoothAdapter?.getProfileProxy(context, a2dpServiceListener, BluetoothProfile.A2DP)
+            }
+            refreshVolume()
+            refreshBluetoothDevices()
+        }
     }
 
     fun refreshExternalMediaAccess() {
@@ -593,20 +597,23 @@ class AudioEngine(private val context: Context) {
 
     // --- Égaliseur 5 bandes (android.media.audiofx.Equalizer) ---
     fun syncEqSettings(enabled: Boolean, presetIndex: Int, customBandsMb: List<Int>) {
-        savedCustomBandsMb = List(5) { idx -> customBandsMb.getOrElse(idx) { 0 }.coerceIn(-1200, 1200) }
+        savedCustomBandsMb = List(5) { idx -> customBandsMb.getOrElse(idx) { 0 }.coerceIn(EQ_MIN_MB, EQ_MAX_MB) }
         currentEqEnabled = enabled
         val preset = EqPreset.fromIndex(presetIndex)
         currentEqPresetIndex = preset.index
         val targetGains = if (preset == EqPreset.CUSTOM) savedCustomBandsMb else preset.gainsMb
-        currentEqGainsMb = MutableList(5) { idx -> targetGains.getOrElse(idx) { 0 }.coerceIn(-1200, 1200) }
+        currentEqGainsMb = MutableList(5) { idx -> targetGains.getOrElse(idx) { 0 }.coerceIn(EQ_MIN_MB, EQ_MAX_MB) }
 
+        ensureEqualizerAttached()
         applyEqToHardware()
         publishEqState()
     }
 
     fun setEqEnabled(enabled: Boolean) {
         currentEqEnabled = enabled
+        ensureEqualizerAttached()
         runCatching { equalizer?.enabled = enabled }
+        applyEqToHardware()
         publishEqState()
     }
 
@@ -614,7 +621,8 @@ class AudioEngine(private val context: Context) {
         val preset = EqPreset.fromIndex(presetIndex)
         currentEqPresetIndex = preset.index
         val gains = if (preset == EqPreset.CUSTOM) savedCustomBandsMb else preset.gainsMb
-        currentEqGainsMb = MutableList(5) { idx -> gains.getOrElse(idx) { 0 }.coerceIn(-1200, 1200) }
+        currentEqGainsMb = MutableList(5) { idx -> gains.getOrElse(idx) { 0 }.coerceIn(EQ_MIN_MB, EQ_MAX_MB) }
+        ensureEqualizerAttached()
         applyEqToHardware()
         publishEqState()
         return preset
@@ -622,17 +630,74 @@ class AudioEngine(private val context: Context) {
 
     fun setEqBandLevel(bandIndex: Short, levelMb: Short): List<Int> {
         val idx = bandIndex.toInt().coerceIn(0, 4)
-        val clamped = levelMb.toInt().coerceIn(-1200, 1200)
+        val clamped = levelMb.toInt().coerceIn(EQ_MIN_MB, EQ_MAX_MB)
         currentEqGainsMb[idx] = clamped
         savedCustomBandsMb = currentEqGainsMb.toList()
         currentEqPresetIndex = EqPreset.CUSTOM.index
+        ensureEqualizerAttached()
         applyEqToHardware()
         publishEqState()
         return savedCustomBandsMb
     }
 
+    fun openSystemDspEqualizer(): Boolean {
+        val sessionId = runCatching { mediaPlayer?.audioSessionId }.getOrNull()?.takeIf { it > 0 } ?: 0
+        val panelIntent = Intent(AudioEffect.ACTION_DISPLAY_AUDIO_EFFECT_CONTROL_PANEL).apply {
+            putExtra(AudioEffect.EXTRA_PACKAGE_NAME, context.packageName)
+            putExtra(AudioEffect.EXTRA_AUDIO_SESSION, sessionId)
+            putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val pm = context.packageManager
+        val panelLaunched = runCatching {
+            if (panelIntent.resolveActivity(pm) != null) {
+                context.startActivity(panelIntent)
+                true
+            } else {
+                false
+            }
+        }.getOrDefault(false)
+        if (panelLaunched) return true
+
+        val knownDspPackages = listOf(
+            "com.android.musicfx",
+            "com.tw.eq",
+            "com.syu.eq",
+            "com.ts.main.eq",
+            "com.xyauto.eq",
+            "com.qf.dsp",
+            "com.szchoiceway.eq",
+            "com.microntek.eq",
+            "com.maxmpz.equalizer",
+        )
+        for (pkg in knownDspPackages) {
+            val launchIntent = runCatching { pm.getLaunchIntentForPackage(pkg) }.getOrNull() ?: continue
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val launched = runCatching {
+                context.startActivity(launchIntent)
+                true
+            }.getOrDefault(false)
+            if (launched) return true
+        }
+        return false
+    }
+
+    private fun ensureEqualizerAttached() {
+        if (equalizer != null) return
+        val mpSession = runCatching { mediaPlayer?.audioSessionId }.getOrNull() ?: 0
+        if (mpSession > 0) {
+            setupEqualizer(mpSession)
+        } else {
+            runCatching {
+                equalizer = Equalizer(0, 0)
+            }.onFailure {
+                equalizer = null
+            }
+        }
+    }
+
     private fun setupEqualizer(audioSessionId: Int) {
-        if (audioSessionId <= 0) return
+        if (audioSessionId < 0) return
         runCatching {
             equalizer?.release()
             val eq = Equalizer(0, audioSessionId)
@@ -648,12 +713,12 @@ class AudioEngine(private val context: Context) {
         val eq = equalizer ?: return
         runCatching {
             eq.enabled = currentEqEnabled
-            val count = eq.numberOfBands.toInt().coerceAtMost(5)
+            val count = eq.numberOfBands.toInt().coerceIn(0, 5)
             val range = eq.bandLevelRange
-            val minMb = range[0].toInt()
-            val maxMb = range[1].toInt()
+            val minHw = minOf(range[0].toInt(), range[1].toInt())
+            val maxHw = maxOf(range[0].toInt(), range[1].toInt())
             for (i in 0 until count) {
-                val target = currentEqGainsMb.getOrElse(i) { 0 }.coerceIn(minMb, maxMb).toShort()
+                val target = currentEqGainsMb.getOrElse(i) { 0 }.coerceIn(minHw, maxHw).toShort()
                 eq.setBandLevel(i.toShort(), target)
             }
         }
@@ -662,23 +727,27 @@ class AudioEngine(private val context: Context) {
     private fun publishEqState() {
         val eq = equalizer
         val presetLabel = EqPreset.fromIndex(currentEqPresetIndex).label
+        // Toujours garantir -1500..+1500 mB (-15 dB à +15 dB) même si le DSP autoradio renvoie 0..0
         val bands = if (eq != null) {
             runCatching {
-                val range = eq.bandLevelRange
-                val minUi = maxOf(range[0].toInt(), -1200).toShort()
-                val maxUi = minOf(range[1].toInt(), 1200).toShort()
-                val count = eq.numberOfBands.toInt().coerceAtMost(5)
-                (0 until count).map { idx ->
+                val count = eq.numberOfBands.toInt().coerceIn(1, 5)
+                (0 until 5).map { idx ->
                     val sIdx = idx.toShort()
-                    val level = currentEqGainsMb.getOrElse(idx) { eq.getBandLevel(sIdx).toInt() }
-                        .coerceIn(minUi.toInt(), maxUi.toInt())
+                    val centerHz = if (idx < count) {
+                        runCatching { (eq.getCenterFreq(sIdx) / 1000).coerceAtLeast(20) }
+                            .getOrDefault(DEFAULT_BAND_FREQS_HZ[idx])
+                    } else {
+                        DEFAULT_BAND_FREQS_HZ[idx]
+                    }
+                    val level = currentEqGainsMb.getOrElse(idx) { 0 }
+                        .coerceIn(EQ_MIN_MB, EQ_MAX_MB)
                         .toShort()
                     EqBandState(
                         index = sIdx,
-                        centerFreqHz = (eq.getCenterFreq(sIdx) / 1000).coerceAtLeast(20),
+                        centerFreqHz = centerHz,
                         levelMb = level,
-                        minMb = minUi,
-                        maxMb = maxUi,
+                        minMb = EQ_MIN_MB.toShort(),
+                        maxMb = EQ_MAX_MB.toShort(),
                     )
                 }
             }.getOrElse { buildDefaultEqBands(currentEqGainsMb) }
@@ -744,50 +813,53 @@ class AudioEngine(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun refreshBluetoothDevices() {
-        val hasPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
-        }
+        scope.launch(Dispatchers.IO) {
+            val hasPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            } else {
+                ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH) == PackageManager.PERMISSION_GRANTED
+            }
 
-        val btEnabled = bluetoothAdapter?.isEnabled == true
-        if (!hasPerm || !btEnabled) {
+            val btEnabled = bluetoothAdapter?.isEnabled == true
+            if (!hasPerm || !btEnabled) {
+                _state.update {
+                    it.copy(
+                        hasBluetoothPermission = hasPerm,
+                        bluetoothEnabled = btEnabled,
+                        connectedBtDevice = null,
+                        pairedBtDevices = emptyList(),
+                        btAudioActive = audioManager.isBluetoothA2dpOn,
+                    )
+                }
+                return@launch
+            }
+
+            val connectedA2dp = runCatching { a2dpProxy?.connectedDevices ?: emptyList() }.getOrDefault(emptyList())
+            val connectedAddresses = connectedA2dp.map { it.address }.toSet()
+
+            val paired = runCatching {
+                bluetoothAdapter?.bondedDevices?.map { dev ->
+                    val isConn = dev.address in connectedAddresses
+                    val cleanName = UniversalMediaManager.sanitizeMediaText(dev.name).ifBlank { "Appareil Bluetooth" }
+                    BluetoothAudioDeviceInfo(
+                        name = cleanName,
+                        address = dev.address,
+                        isConnectedA2dp = isConn,
+                        batteryPercent = readDeviceBattery(dev),
+                    )
+                }.orEmpty()
+            }.getOrDefault(emptyList())
+
+            val activeDevice = paired.firstOrNull { it.isConnectedA2dp }
             _state.update {
                 it.copy(
-                    hasBluetoothPermission = hasPerm,
-                    bluetoothEnabled = btEnabled,
-                    connectedBtDevice = null,
-                    pairedBtDevices = emptyList(),
-                    btAudioActive = audioManager.isBluetoothA2dpOn,
+                    hasBluetoothPermission = true,
+                    bluetoothEnabled = true,
+                    connectedBtDevice = activeDevice,
+                    pairedBtDevices = paired,
+                    btAudioActive = audioManager.isMusicActive && activeDevice != null,
                 )
             }
-            return
-        }
-
-        val connectedA2dp = runCatching { a2dpProxy?.connectedDevices ?: emptyList() }.getOrDefault(emptyList())
-        val connectedAddresses = connectedA2dp.map { it.address }.toSet()
-
-        val paired = runCatching {
-            bluetoothAdapter?.bondedDevices?.map { dev ->
-                val isConn = dev.address in connectedAddresses
-                BluetoothAudioDeviceInfo(
-                    name = dev.name ?: "Appareil Bluetooth",
-                    address = dev.address,
-                    isConnectedA2dp = isConn,
-                    batteryPercent = readDeviceBattery(dev),
-                )
-            }.orEmpty()
-        }.getOrDefault(emptyList())
-
-        val activeDevice = paired.firstOrNull { it.isConnectedA2dp }
-        _state.update {
-            it.copy(
-                hasBluetoothPermission = true,
-                bluetoothEnabled = true,
-                connectedBtDevice = activeDevice,
-                pairedBtDevices = paired,
-                btAudioActive = audioManager.isMusicActive && activeDevice != null,
-            )
         }
     }
 

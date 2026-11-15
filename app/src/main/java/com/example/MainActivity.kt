@@ -27,6 +27,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -57,6 +59,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -183,17 +188,11 @@ fun AutoPulseAppRoot(
     homeReturnTrigger: Int = 0,
     onReturnedHome: () -> Unit = {},
 ) {
-    val mediaState by viewModel.mediaState.collectAsStateWithLifecycle()
-    val speedState by viewModel.speedState.collectAsStateWithLifecycle()
-    val autoSpeedLimitState by viewModel.autoSpeedLimitState.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
-    val tracks by viewModel.tracks.collectAsStateWithLifecycle()
-    val tripStats by viewModel.tripStats.collectAsStateWithLifecycle()
     val installedApps by viewModel.installedApps.collectAsStateWithLifecycle()
     val dockApps by viewModel.dockApps.collectAsStateWithLifecycle()
     val isDefaultLauncher by viewModel.isDefaultLauncher.collectAsStateWithLifecycle()
     val hasOverlayPermission by viewModel.hasOverlayPermission.collectAsStateWithLifecycle()
-    val coverSyncState by viewModel.coverSyncState.collectAsStateWithLifecycle()
     val showBreakReminder by viewModel.showBreakReminder.collectAsStateWithLifecycle()
     val feedback by viewModel.feedbackMessage.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -325,7 +324,9 @@ fun AutoPulseAppRoot(
                 NavigationRail(
                     containerColor = CarbonSurface,
                     windowInsets = WindowInsets(0, 0, 0, 0),
-                    modifier = Modifier.fillMaxHeight(),
+                    modifier = Modifier
+                        .width(96.dp)
+                        .fillMaxHeight(),
                 ) {
                     if (currentRoute != ROUTE_COCKPIT) {
                         RailClockBadge()
@@ -341,8 +342,21 @@ fun AutoPulseAppRoot(
                             NavigationRailItem(
                                 selected = selected,
                                 onClick = { navigateTo(dest.route) },
-                                icon = { Icon(dest.icon, contentDescription = dest.label) },
-                                label = { Text(dest.label, maxLines = 1) },
+                                icon = {
+                                    Icon(
+                                        imageVector = dest.icon,
+                                        contentDescription = dest.label,
+                                        modifier = Modifier.size(30.dp),
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = dest.label,
+                                        fontSize = 13.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1,
+                                    )
+                                },
                                 colors = NavigationRailItemDefaults.colors(
                                     selectedIconColor = accent,
                                     selectedTextColor = accent,
@@ -357,8 +371,21 @@ fun AutoPulseAppRoot(
                             NavigationRailItem(
                                 selected = showAppLibrary,
                                 onClick = { showAppLibrary = true },
-                                icon = { Icon(Icons.Rounded.Apps, contentDescription = "Bibliothèque d'applications") },
-                                label = { Text("Apps", maxLines = 1) },
+                                icon = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Apps,
+                                        contentDescription = "Bibliothèque d'applications",
+                                        modifier = Modifier.size(30.dp),
+                                    )
+                                },
+                                label = {
+                                    Text(
+                                        text = "Apps",
+                                        fontSize = 13.sp,
+                                        fontWeight = if (showAppLibrary) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1,
+                                    )
+                                },
                                 colors = NavigationRailItemDefaults.colors(
                                     selectedIconColor = accent,
                                     selectedTextColor = accent,
@@ -383,10 +410,10 @@ fun AutoPulseAppRoot(
                 ) {
                     composable(ROUTE_COCKPIT) {
                         CockpitHomeScreen(
-                            mediaState = mediaState,
-                            speedState = speedState,
+                            mediaStateFlow = viewModel.mediaState,
+                            speedStateFlow = viewModel.speedState,
                             settings = settings,
-                            autoSpeedLimitState = autoSpeedLimitState,
+                            autoSpeedLimitStateFlow = viewModel.autoSpeedLimitState,
                             showBreakReminder = showBreakReminder,
                             dockApps = dockApps,
                             getCachedIcon = { viewModel.getCachedAppIcon(it) },
@@ -412,8 +439,8 @@ fun AutoPulseAppRoot(
                     }
                     composable(ROUTE_MEDIA) {
                         MediaScreen(
-                            mediaState = mediaState,
-                            tracks = tracks,
+                            mediaStateFlow = viewModel.mediaState,
+                            tracksFlow = viewModel.tracks,
                             onSelectSource = { viewModel.setAudioSource(it) },
                             onPlayTrack = { viewModel.audioEngine.playTrack(it) },
                             onTogglePlayPause = { viewModel.audioEngine.togglePlayPause() },
@@ -428,6 +455,7 @@ fun AutoPulseAppRoot(
                             onSetEqEnabled = { viewModel.setEqEnabled(it) },
                             onApplyEqPreset = { viewModel.applyEqPreset(it) },
                             onSetEqBand = { idx, level -> viewModel.setEqBandLevel(idx, level) },
+                            onOpenSystemDsp = { viewModel.openSystemDspEqualizer() },
                             onSetVolume = { viewModel.audioEngine.setVolume(it) },
                             onRefreshBluetooth = { viewModel.audioEngine.refreshBluetoothDevices() },
                             onRequestBtPermission = { permissionLauncher.launch(permissionsToRequest) },
@@ -437,21 +465,21 @@ fun AutoPulseAppRoot(
                     }
                     composable(ROUTE_TRIP) {
                         TripScreen(
-                            tripStats = tripStats,
-                            speedState = speedState,
+                            tripStatsFlow = viewModel.tripStats,
+                            speedStateFlow = viewModel.speedState,
                             onResetTrip = { viewModel.resetTrip() },
                         )
                     }
                     composable(ROUTE_SETTINGS) {
                         SettingsScreen(
                             settings = settings,
-                            mediaState = mediaState,
-                            speedState = speedState,
+                            mediaStateFlow = viewModel.mediaState,
+                            speedStateFlow = viewModel.speedState,
                             installedApps = installedApps,
                             isDefaultLauncher = isDefaultLauncher,
                             hasOverlayPermission = hasOverlayPermission,
                             isNightFilterActiveNow = isNightFilterActiveNow,
-                            coverSyncState = coverSyncState,
+                            coverSyncStateFlow = viewModel.coverSyncState,
                             onAccentColorSelected = { viewModel.setAccentColorId(it) },
                             onNightDimmerChange = { viewModel.setNightDimmerAlpha(it) },
                             onAutoNightModeChange = { viewModel.setAutoNightModeEnabled(it) },
@@ -459,6 +487,7 @@ fun AutoPulseAppRoot(
                             onSetEqEnabled = { viewModel.setEqEnabled(it) },
                             onApplyEqPreset = { viewModel.applyEqPreset(it) },
                             onSetEqBand = { idx, level -> viewModel.setEqBandLevel(idx, level) },
+                            onOpenSystemDsp = { viewModel.openSystemDspEqualizer() },
                             onSdvcChange = { viewModel.setSdvcEnabled(it) },
                             onFloatingPillChange = { viewModel.setFloatingPillEnabled(it) },
                             onExportConfig = { uri -> viewModel.exportConfigToUri(uri) },

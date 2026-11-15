@@ -50,9 +50,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.data.MAX_DOCK_APPS
 import com.example.hardware.InstalledAppInfo
 import com.example.ui.theme.AmberWarn
@@ -99,8 +101,8 @@ fun AppLibraryOverlay(
         contentAlignment = Alignment.Center,
     ) {
         val isCompactHeight = maxHeight < 460.dp
-        val tileMinWidth = if (maxWidth >= 1000.dp) 148.dp else 124.dp
-        val overlayPad = if (isCompactHeight) 12.dp else 18.dp
+        val tileMinWidth = if (maxWidth >= 1000.dp) 160.dp else 136.dp
+        val overlayPad = if (isCompactHeight) 14.dp else 20.dp
 
         Surface(
             color = CarbonSurface,
@@ -270,24 +272,24 @@ private fun AppLibraryTile(
                 bitmap = bmp,
                 contentDescription = app.label,
                 modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(12.dp)),
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(14.dp)),
             )
         } else {
             Box(
                 modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(12.dp))
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(14.dp))
                     .background(container),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Rounded.Apps, contentDescription = app.label, tint = accent)
+                Icon(Icons.Rounded.Apps, contentDescription = app.label, tint = accent, modifier = Modifier.size(28.dp))
             }
         }
 
         Text(
             text = app.label,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp, fontWeight = FontWeight.SemiBold),
             color = TextPrimary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -297,7 +299,7 @@ private fun AppLibraryTile(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(34.dp)
+                .height(42.dp)
                 .clip(RoundedCornerShape(10.dp))
                 .background(if (isPinned) container else CarbonSurface)
                 .border(
@@ -306,7 +308,7 @@ private fun AppLibraryTile(
                     RoundedCornerShape(10.dp),
                 )
                 .clickable(onClick = onToggleDock)
-                .padding(horizontal = 6.dp),
+                .padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
         ) {
@@ -314,12 +316,12 @@ private fun AppLibraryTile(
                 imageVector = Icons.Rounded.PushPin,
                 contentDescription = if (isPinned) "Retirer du dock" else "Ajouter au dock",
                 tint = if (isPinned) EmeraldOk else AmberWarn,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(16.dp),
             )
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(5.dp))
             Text(
                 text = if (isPinned) "Sur le dock" else "+ Dock",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp),
                 color = if (isPinned) accent else TextSecondary,
                 maxLines = 1,
             )

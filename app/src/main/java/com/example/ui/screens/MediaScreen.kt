@@ -16,6 +16,7 @@ import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -32,6 +33,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -42,7 +44,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
@@ -68,6 +69,7 @@ import androidx.compose.material.icons.rounded.OpenInFull
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Radio
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Repeat
 import androidx.compose.material.icons.rounded.RepeatOne
@@ -120,6 +122,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.R
 import com.example.data.db.AudioTrackEntity
 import com.example.hardware.AudioEngine
@@ -128,6 +132,7 @@ import com.example.hardware.EqPreset
 import com.example.hardware.ExternalRepeatMode
 import com.example.hardware.MediaPlayerState
 import com.example.hardware.MetadataFetcher
+import com.example.hardware.UniversalMediaManager
 import com.example.ui.components.LightweightEqualizerBars
 import com.example.ui.theme.AmberWarn
 import com.example.ui.theme.CarbonBorder
@@ -140,6 +145,7 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 
 private enum class LibraryCategory(val label: String) {
@@ -170,8 +176,8 @@ private fun categoryKeyForTrack(track: AudioTrackEntity, category: LibraryCatego
 
 @Composable
 fun MediaScreen(
-    mediaState: MediaPlayerState,
-    tracks: List<AudioTrackEntity>,
+    mediaStateFlow: StateFlow<MediaPlayerState>,
+    tracksFlow: StateFlow<List<AudioTrackEntity>>,
     onSelectSource: (AudioSourceMode) -> Unit,
     onPlayTrack: (AudioTrackEntity) -> Unit,
     onTogglePlayPause: () -> Unit,
@@ -186,6 +192,7 @@ fun MediaScreen(
     onSetEqEnabled: (Boolean) -> Unit,
     onApplyEqPreset: (Int) -> Unit,
     onSetEqBand: (Short, Short) -> Unit,
+    onOpenSystemDsp: () -> Unit,
     onSetVolume: (Int) -> Unit,
     onRefreshBluetooth: () -> Unit,
     onRequestBtPermission: () -> Unit,
@@ -193,6 +200,9 @@ fun MediaScreen(
     closeOverlaysSignal: Int = 0,
     modifier: Modifier = Modifier,
 ) {
+    val mediaState by mediaStateFlow.collectAsStateWithLifecycle()
+    val tracks by tracksFlow.collectAsStateWithLifecycle()
+
     var isSidePanelOpen by remember { mutableStateOf(false) }
     var isLibraryExpanded by remember { mutableStateOf(false) }
     var showEqDialog by remember { mutableStateOf(false) }
@@ -245,8 +255,8 @@ fun MediaScreen(
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val isCompactHeight = maxHeight < 440.dp
-        val outerPad = if (isCompactHeight) 10.dp else 16.dp
-        val paneGap = if (maxWidth >= 840.dp) 16.dp else 12.dp
+        val outerPad = if (isCompactHeight) 12.dp else 18.dp
+        val paneGap = if (maxWidth >= 840.dp) 18.dp else 14.dp
 
         Row(
             modifier = Modifier
@@ -363,6 +373,7 @@ fun MediaScreen(
             onSetEqEnabled = onSetEqEnabled,
             onApplyPreset = onApplyEqPreset,
             onSetBand = onSetEqBand,
+            onOpenSystemDsp = onOpenSystemDsp,
         )
     }
 
@@ -404,6 +415,12 @@ private fun PlayerDeckPane(
 
     val isExternal = mediaState.sourceMode == AudioSourceMode.EXTERNAL
     val ext = mediaState.externalMedia
+    val isFmRadio = isExternal && ext.isFmRadio
+
+    val cleanBtName = UniversalMediaManager.sanitizeMediaText(mediaState.connectedBtDevice?.name)
+    val cleanExtTitle = UniversalMediaManager.sanitizeMediaText(ext.title)
+    val cleanExtArtist = UniversalMediaManager.sanitizeMediaText(ext.artist)
+    val cleanExtApp = UniversalMediaManager.sanitizeMediaText(ext.appName)
 
     val playing = if (isExternal) {
         if (ext.hasActiveSession) ext.isPlaying else mediaState.btAudioActive
@@ -419,8 +436,16 @@ private fun PlayerDeckPane(
 
     val titleText = if (isExternal) {
         when {
-            ext.hasActiveSession -> ext.title
-            mediaState.connectedBtDevice != null -> mediaState.connectedBtDevice.name
+            isFmRadio -> UniversalMediaManager.sanitizeMediaText(ext.fmStationName)
+                .ifBlank { cleanExtTitle }
+                .ifBlank {
+                    if (ext.fmFrequencyMhz.isNotBlank()) "${ext.fmFrequencyMhz} MHz" else "Radio FM"
+                }
+            ext.hasActiveSession -> cleanExtTitle
+                .ifBlank { cleanBtName }
+                .ifBlank { cleanExtApp }
+                .ifBlank { "Audio Externe / BT" }
+            cleanBtName.isNotBlank() -> cleanBtName
             else -> "Audio Externe / BT"
         }
     } else {
@@ -429,9 +454,16 @@ private fun PlayerDeckPane(
 
     val subtitleText = if (isExternal) {
         when {
-            ext.hasActiveSession -> "${ext.artist} • ${ext.appName}"
-            mediaState.connectedBtDevice != null -> "Contrôle AVRCP actif"
-            else -> "Spotify, YouTube Music, Deezer ou Bluetooth"
+            isFmRadio -> UniversalMediaManager.buildFmSubtitle(
+                frequencyMhz = ext.fmFrequencyMhz,
+                rdsText = UniversalMediaManager.sanitizeMediaText(ext.fmRdsText),
+            )
+            ext.hasActiveSession -> listOfNotNull(
+                cleanExtArtist.takeIf { it.isNotBlank() && !it.equals(titleText, ignoreCase = true) },
+                cleanExtApp.takeIf { it.isNotBlank() },
+            ).joinToString(" • ").ifBlank { "Lecture externe active" }
+            cleanBtName.isNotBlank() -> "Contrôle AVRCP actif"
+            else -> "Spotify, YouTube Music, Deezer, Radio FM ou BT"
         }
     } else {
         val track = mediaState.currentTrack
@@ -451,6 +483,13 @@ private fun PlayerDeckPane(
         }
     }
 
+    val extTabLabel = when {
+        isFmRadio -> "Radio FM"
+        ext.hasActiveSession && cleanExtApp.isNotBlank() -> cleanExtApp.take(16)
+        else -> "Externe • BT • FM"
+    }
+    val extTabIcon = if (isFmRadio) Icons.Rounded.Radio else Icons.Rounded.Bluetooth
+
     val activeArt = if (isExternal) ext.albumArt else mediaState.currentAlbumArt
     val activeArtBitmap = remember(
         mediaState.currentTrack?.id,
@@ -461,7 +500,7 @@ private fun PlayerDeckPane(
     ) {
         activeArt?.asImageBitmap()
     }
-    val artTrackKey = if (isExternal) "ext_${ext.title}" else "loc_${mediaState.currentTrack?.id ?: -1}"
+    val artTrackKey = if (isExternal) "ext_${ext.title}_${ext.fmFrequencyMhz}" else "loc_${mediaState.currentTrack?.id ?: -1}"
     val panelToggleIcon = if (isExternal) Icons.Rounded.Bluetooth else Icons.AutoMirrored.Rounded.QueueMusic
     val panelToggleDesc = if (isExternal) {
         "Afficher les appareils Bluetooth appairés"
@@ -471,17 +510,17 @@ private fun PlayerDeckPane(
 
     BoxWithConstraints(
         modifier = modifier
-            .clip(RoundedCornerShape(24.dp))
+            .clip(RoundedCornerShape(26.dp))
             .background(CarbonSurfaceElevated)
-            .border(1.dp, if (playing) primary.copy(alpha = 0.55f) else CarbonBorder, RoundedCornerShape(24.dp))
-            .padding(if (isCompactHeight) 14.dp else 20.dp),
+            .border(1.dp, if (playing) primary.copy(alpha = 0.55f) else CarbonBorder, RoundedCornerShape(26.dp))
+            .padding(if (isCompactHeight) 16.dp else 22.dp),
     ) {
         val useWideSplitPlayer = !isSidePanelOpen && maxWidth >= 560.dp
-        val ctrlBtnSize = if (isCompactHeight) 46.dp else 54.dp
-        val playBtnSize = if (isCompactHeight) 56.dp else 66.dp
+        val ctrlBtnSize = if (isCompactHeight) 50.dp else 58.dp
+        val playBtnSize = if (isCompactHeight) 62.dp else 72.dp
 
         if (useWideSplitPlayer) {
-            val largeArtSize = minOf(maxHeight * 0.72f, maxWidth * 0.34f).coerceIn(150.dp, 310.dp)
+            val largeArtSize = minOf(maxHeight * 0.72f, maxWidth * 0.34f).coerceIn(160.dp, 320.dp)
 
             Column(
                 modifier = Modifier.fillMaxSize(),
@@ -499,14 +538,14 @@ private fun PlayerDeckPane(
                     ) {
                         Box(
                             modifier = Modifier
-                                .width(22.dp)
+                                .width(24.dp)
                                 .height(4.dp)
                                 .clip(RoundedCornerShape(2.dp))
                                 .background(primary),
                         )
                         Text(
-                            text = "LECTURE EN COURS",
-                            style = MaterialTheme.typography.labelLarge,
+                            text = if (isFmRadio) "RADIO FM EN DIRECT" else "LECTURE EN COURS",
+                            style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp),
                             color = accent,
                         )
                         LightweightEqualizerBars(isPlaying = playing)
@@ -527,7 +566,7 @@ private fun PlayerDeckPane(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(24.dp),
+                    horizontalArrangement = Arrangement.spacedBy(26.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(
@@ -539,6 +578,8 @@ private fun PlayerDeckPane(
                             trackKey = artTrackKey,
                             size = largeArtSize,
                             cornerRadius = 24.dp,
+                            isFmRadio = isFmRadio,
+                            fmFrequencyMhz = ext.fmFrequencyMhz,
                             onSwipePrevious = onPrevTrack,
                             onSwipeNext = onNextTrack,
                         )
@@ -551,7 +592,7 @@ private fun PlayerDeckPane(
                         verticalArrangement = Arrangement.SpaceBetween,
                     ) {
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             SourceTabButton(
@@ -563,8 +604,8 @@ private fun PlayerDeckPane(
                                 modifier = Modifier.weight(1f),
                             )
                             SourceTabButton(
-                                label = if (ext.hasActiveSession) ext.appName.take(14) else "Externe / BT",
-                                icon = Icons.Rounded.Bluetooth,
+                                label = extTabLabel,
+                                icon = extTabIcon,
                                 selected = isExternal,
                                 onClick = { onSelectSource(AudioSourceMode.EXTERNAL) },
                                 testTag = "media_tab_bt",
@@ -572,27 +613,38 @@ private fun PlayerDeckPane(
                             )
                         }
 
-                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Text(
                                 text = titleText,
-                                style = if (isCompactHeight) MaterialTheme.typography.titleLarge else MaterialTheme.typography.headlineSmall,
+                                style = MaterialTheme.typography.headlineSmall.copy(
+                                    fontSize = if (isCompactHeight) 22.sp else 26.sp,
+                                    fontWeight = FontWeight.Bold,
+                                ),
                                 color = TextPrimary,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.basicMarquee(),
                             )
                             Text(
                                 text = subtitleText,
-                                style = MaterialTheme.typography.bodyLarge,
+                                style = MaterialTheme.typography.bodyLarge.copy(fontSize = 16.sp),
                                 color = TextSecondary,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Spacer(Modifier.height(2.dp))
-                            EqQuickBadge(
-                                eqEnabled = mediaState.eqEnabled,
-                                presetName = mediaState.eqPresetName,
-                                onClick = onOpenEq,
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                if (isFmRadio) {
+                                    FmRadioBadge()
+                                }
+                                EqQuickBadge(
+                                    eqEnabled = mediaState.eqEnabled,
+                                    presetName = mediaState.eqPresetName,
+                                    onClick = onOpenEq,
+                                )
+                            }
                         }
 
                         PlayerSeekSection(
@@ -624,7 +676,7 @@ private fun PlayerDeckPane(
             }
         } else {
             // Mode panneau ouvert (ou écran étroit) : disposition verticale compacte sans débordement
-            val compactArtSize = if (isCompactHeight) 64.dp else 82.dp
+            val compactArtSize = if (isCompactHeight) 70.dp else 88.dp
 
             Column(
                 modifier = Modifier.fillMaxSize(),
@@ -644,8 +696,8 @@ private fun PlayerDeckPane(
                         modifier = Modifier.weight(1f),
                     )
                     SourceTabButton(
-                        label = if (ext.hasActiveSession) ext.appName.take(12) else "Externe / BT",
-                        icon = Icons.Rounded.Bluetooth,
+                        label = extTabLabel,
+                        icon = extTabIcon,
                         selected = isExternal,
                         onClick = { onSelectSource(AudioSourceMode.EXTERNAL) },
                         testTag = "media_tab_bt",
@@ -661,7 +713,7 @@ private fun PlayerDeckPane(
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     AlbumArtworkBox(
@@ -669,37 +721,50 @@ private fun PlayerDeckPane(
                         trackKey = artTrackKey,
                         size = compactArtSize,
                         cornerRadius = 16.dp,
+                        isFmRadio = isFmRadio,
+                        fmFrequencyMhz = ext.fmFrequencyMhz,
                         onSwipePrevious = onPrevTrack,
                         onSwipeNext = onNextTrack,
                     )
-                    Column(modifier = Modifier.weight(1f)) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             Text(
                                 text = titleText,
-                                style = MaterialTheme.typography.titleLarge,
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontSize = 20.sp,
+                                    fontWeight = FontWeight.Bold,
+                                ),
                                 color = TextPrimary,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false),
+                                modifier = Modifier
+                                    .weight(1f, fill = false)
+                                    .basicMarquee(),
                             )
                             LightweightEqualizerBars(isPlaying = playing)
                         }
                         Text(
                             text = subtitleText,
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
                             color = TextSecondary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                        Spacer(Modifier.height(4.dp))
-                        EqQuickBadge(
-                            eqEnabled = mediaState.eqEnabled,
-                            presetName = mediaState.eqPresetName,
-                            onClick = onOpenEq,
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            if (isFmRadio) {
+                                FmRadioBadge()
+                            }
+                            EqQuickBadge(
+                                eqEnabled = mediaState.eqEnabled,
+                                presetName = mediaState.eqPresetName,
+                                onClick = onOpenEq,
+                            )
+                        }
                     }
                 }
 
@@ -714,8 +779,8 @@ private fun PlayerDeckPane(
                     isExternal = isExternal,
                     playing = playing,
                     playScale = playScale,
-                    ctrlBtnSize = if (isCompactHeight) 42.dp else 48.dp,
-                    playBtnSize = if (isCompactHeight) 52.dp else 60.dp,
+                    ctrlBtnSize = if (isCompactHeight) 46.dp else 52.dp,
+                    playBtnSize = if (isCompactHeight) 56.dp else 64.dp,
                     onToggleShuffle = onToggleShuffle,
                     onPrevTrack = onPrevTrack,
                     onTogglePlayPause = onTogglePlayPause,
@@ -747,7 +812,7 @@ private fun PanelToggleIconButton(
         onClick = onClick,
         modifier = Modifier
             .minimumInteractiveComponentSize()
-            .size(48.dp)
+            .size(50.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(if (isOpen) container else CarbonSurface)
             .border(
@@ -761,7 +826,7 @@ private fun PanelToggleIconButton(
             imageVector = icon,
             contentDescription = contentDescription,
             tint = if (isOpen) accent else TextPrimary,
-            modifier = Modifier.size(22.dp),
+            modifier = Modifier.size(24.dp),
         )
     }
 }
@@ -772,9 +837,14 @@ private fun AlbumArtworkBox(
     trackKey: String,
     size: Dp,
     cornerRadius: Dp,
+    isFmRadio: Boolean,
+    fmFrequencyMhz: String,
     onSwipePrevious: () -> Unit,
     onSwipeNext: () -> Unit,
 ) {
+    val primary = MaterialTheme.colorScheme.primary
+    val accent = MaterialTheme.colorScheme.secondary
+    val container = MaterialTheme.colorScheme.primaryContainer
     val swipeThresholdPx = with(LocalDensity.current) { 60.dp.toPx() }
     var dragOffsetX by remember(trackKey) { mutableFloatStateOf(0f) }
     val animatedOffset by animateFloatAsState(
@@ -787,7 +857,7 @@ private fun AlbumArtworkBox(
         modifier = Modifier
             .size(size)
             .clip(RoundedCornerShape(cornerRadius))
-            .border(1.dp, CarbonBorder, RoundedCornerShape(cornerRadius))
+            .border(1.dp, if (isFmRadio) primary.copy(alpha = 0.65f) else CarbonBorder, RoundedCornerShape(cornerRadius))
             .pointerInput(trackKey) {
                 detectHorizontalDragGestures(
                     onDragStart = { dragOffsetX = 0f },
@@ -821,6 +891,35 @@ private fun AlbumArtworkBox(
                 contentScale = ContentScale.Crop,
                 modifier = imageModifier,
             )
+        } else if (isFmRadio) {
+            Box(
+                modifier = imageModifier.background(container.copy(alpha = 0.55f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Radio,
+                        contentDescription = "Radio FM",
+                        tint = accent,
+                        modifier = Modifier.size((size * 0.36f).coerceIn(28.dp, 64.dp)),
+                    )
+                    if (fmFrequencyMhz.isNotBlank()) {
+                        Text(
+                            text = fmFrequencyMhz,
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = if (size >= 140.dp) 22.sp else 13.sp,
+                            ),
+                            color = TextPrimary,
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
         } else {
             Image(
                 painter = painterResource(id = R.drawable.img_album_red),
@@ -829,6 +928,36 @@ private fun AlbumArtworkBox(
                 modifier = imageModifier,
             )
         }
+    }
+}
+
+@Composable
+private fun FmRadioBadge() {
+    val primary = MaterialTheme.colorScheme.primary
+    val accent = MaterialTheme.colorScheme.secondary
+    val container = MaterialTheme.colorScheme.primaryContainer
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(container.copy(alpha = 0.85f))
+            .border(1.dp, primary, RoundedCornerShape(10.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .testTag("media_fm_radio_badge"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Radio,
+            contentDescription = "Radio FM",
+            tint = accent,
+            modifier = Modifier.size(16.dp),
+        )
+        Text(
+            text = "Radio FM",
+            style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp, fontWeight = FontWeight.Bold),
+            color = accent,
+            maxLines = 1,
+        )
     }
 }
 
@@ -852,7 +981,7 @@ private fun EqQuickBadge(
                 RoundedCornerShape(10.dp),
             )
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 12.dp, vertical = 7.dp)
             .testTag("media_eq_button"),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -861,11 +990,11 @@ private fun EqQuickBadge(
             imageVector = Icons.Rounded.Equalizer,
             contentDescription = "Égaliseur",
             tint = if (eqEnabled) accent else TextSecondary,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(18.dp),
         )
         Text(
             text = label,
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp),
             color = if (eqEnabled) accent else TextSecondary,
             maxLines = 1,
         )
@@ -899,12 +1028,12 @@ private fun PlayerSeekSection(
             ) {
                 Text(
                     text = AudioEngine.formatDuration(mediaState.positionMs),
-                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily, fontSize = 13.sp),
                     color = TextSecondary,
                 )
                 Text(
                     text = AudioEngine.formatDuration(mediaState.durationMs),
-                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily, fontSize = 13.sp),
                     color = TextSecondary,
                 )
             }
@@ -946,12 +1075,12 @@ private fun PlayerSeekSection(
             ) {
                 Text(
                     text = AudioEngine.formatDuration(displayedPosMs),
-                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily, fontSize = 13.sp),
                     color = TextSecondary,
                 )
                 Text(
                     text = AudioEngine.formatDuration(ext.durationMs),
-                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily, fontSize = 13.sp),
                     color = TextSecondary,
                 )
             }
@@ -1009,6 +1138,7 @@ private fun PlayerTransportRow(
                     shuffleActive -> primary
                     else -> TextSecondary
                 },
+                modifier = Modifier.size(26.dp),
             )
         }
         IconButton(
@@ -1019,7 +1149,7 @@ private fun PlayerTransportRow(
                 .background(CarbonSurface)
                 .testTag("media_prev_btn"),
         ) {
-            Icon(Icons.Rounded.SkipPrevious, contentDescription = "Précédent", tint = TextPrimary, modifier = Modifier.size(28.dp))
+            Icon(Icons.Rounded.SkipPrevious, contentDescription = "Précédent", tint = TextPrimary, modifier = Modifier.size(30.dp))
         }
         IconButton(
             onClick = onTogglePlayPause,
@@ -1037,7 +1167,7 @@ private fun PlayerTransportRow(
                 imageVector = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                 contentDescription = "Lecture / Pause",
                 tint = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(34.dp),
+                modifier = Modifier.size(38.dp),
             )
         }
         IconButton(
@@ -1048,7 +1178,7 @@ private fun PlayerTransportRow(
                 .background(CarbonSurface)
                 .testTag("media_next_btn"),
         ) {
-            Icon(Icons.Rounded.SkipNext, contentDescription = "Suivant", tint = TextPrimary, modifier = Modifier.size(28.dp))
+            Icon(Icons.Rounded.SkipNext, contentDescription = "Suivant", tint = TextPrimary, modifier = Modifier.size(30.dp))
         }
         IconButton(
             onClick = onToggleRepeat,
@@ -1065,6 +1195,7 @@ private fun PlayerTransportRow(
                     repeatActive -> primary
                     else -> TextSecondary
                 },
+                modifier = Modifier.size(26.dp),
             )
         }
     }
@@ -1078,10 +1209,10 @@ private fun PlayerVolumeRow(
     val accent = MaterialTheme.colorScheme.secondary
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Icon(Icons.AutoMirrored.Rounded.VolumeUp, contentDescription = "Volume", tint = TextSecondary, modifier = Modifier.size(20.dp))
+        Icon(Icons.AutoMirrored.Rounded.VolumeUp, contentDescription = "Volume", tint = TextSecondary, modifier = Modifier.size(24.dp))
         Slider(
             value = mediaState.mediaVolume.toFloat(),
             onValueChange = { onSetVolume(it.toInt()) },
@@ -1091,7 +1222,7 @@ private fun PlayerVolumeRow(
         )
         Text(
             text = "${mediaState.mediaVolume}",
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelLarge.copy(fontSize = 15.sp, fontFamily = JetBrainsMonoFamily),
             color = TextPrimary,
         )
     }
@@ -1141,9 +1272,9 @@ private fun SourceLibraryPane(
                 text = if (mediaState.sourceMode == AudioSourceMode.LOCAL) {
                     "Bibliothèque (${tracks.size})"
                 } else {
-                    "Appareils Bluetooth & Média"
+                    "Bluetooth, Média & Radio FM"
                 },
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.titleMedium.copy(fontSize = 18.sp),
                 color = TextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1154,7 +1285,7 @@ private fun SourceLibraryPane(
                     onClick = onOpenImportDialog,
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
-                        .size(40.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .background(container.copy(alpha = 0.72f))
                         .border(1.dp, primary.copy(alpha = 0.65f), CircleShape)
@@ -1164,14 +1295,14 @@ private fun SourceLibraryPane(
                         imageVector = Icons.Rounded.Add,
                         contentDescription = "Importer",
                         tint = accent,
-                        modifier = Modifier.size(20.dp),
+                        modifier = Modifier.size(22.dp),
                     )
                 }
                 IconButton(
                     onClick = onExpandLibrary,
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
-                        .size(40.dp)
+                        .size(44.dp)
                         .clip(CircleShape)
                         .background(CarbonSurfaceElevated)
                         .border(1.dp, CarbonBorder, CircleShape)
@@ -1181,7 +1312,7 @@ private fun SourceLibraryPane(
                         imageVector = Icons.Rounded.OpenInFull,
                         contentDescription = "Agrandir la bibliothèque",
                         tint = accent,
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(20.dp),
                     )
                 }
             }
@@ -1189,16 +1320,16 @@ private fun SourceLibraryPane(
                 onClick = onClosePanel,
                 modifier = Modifier
                     .minimumInteractiveComponentSize()
-                    .size(40.dp)
+                    .size(44.dp)
                     .clip(CircleShape)
                     .background(CarbonSurfaceElevated)
                     .testTag("media_close_panel_btn"),
             ) {
-                Icon(Icons.Rounded.Close, contentDescription = "Fermer le panneau", tint = TextPrimary, modifier = Modifier.size(18.dp))
+                Icon(Icons.Rounded.Close, contentDescription = "Fermer le panneau", tint = TextPrimary, modifier = Modifier.size(20.dp))
             }
         }
 
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
 
         if (mediaState.sourceMode == AudioSourceMode.LOCAL) {
             LocalLibraryContent(
@@ -1219,7 +1350,11 @@ private fun SourceLibraryPane(
                 modifier = Modifier.weight(1f),
             )
         } else {
-            // Contrôle Média Universel (MediaSessionManager) + Bluetooth A2DP
+            val ext = mediaState.externalMedia
+            val cleanExtTitle = UniversalMediaManager.sanitizeMediaText(ext.title)
+            val cleanExtApp = UniversalMediaManager.sanitizeMediaText(ext.appName)
+
+            // Contrôle Média Universel (MediaSessionManager) + Radio FM + Bluetooth A2DP
             Surface(
                 color = CarbonSurfaceElevated,
                 shape = RoundedCornerShape(14.dp),
@@ -1227,39 +1362,45 @@ private fun SourceLibraryPane(
                     .fillMaxWidth()
                     .border(
                         1.dp,
-                        if (mediaState.hasNotificationListenerAccess) EmeraldOk.copy(alpha = 0.4f) else AmberWarn.copy(alpha = 0.5f),
+                        if (mediaState.hasNotificationListenerAccess || ext.isFmRadio) EmeraldOk.copy(alpha = 0.4f) else AmberWarn.copy(alpha = 0.5f),
                         RoundedCornerShape(14.dp),
                     ),
             ) {
                 Row(
-                    modifier = Modifier.padding(12.dp),
+                    modifier = Modifier.padding(14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.NotificationsActive,
+                        imageVector = if (ext.isFmRadio) Icons.Rounded.Radio else Icons.Rounded.NotificationsActive,
                         contentDescription = null,
-                        tint = if (mediaState.hasNotificationListenerAccess) EmeraldOk else AmberWarn,
+                        tint = if (mediaState.hasNotificationListenerAccess || ext.isFmRadio) EmeraldOk else AmberWarn,
+                        modifier = Modifier.size(24.dp),
                     )
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = "Contrôle Média Universel",
-                            style = MaterialTheme.typography.labelLarge,
+                            text = if (ext.isFmRadio) "Radio FM Autoradio" else "Contrôle Média Universel",
+                            style = MaterialTheme.typography.labelLarge.copy(fontSize = 15.sp),
                             color = TextPrimary,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            text = if (mediaState.hasNotificationListenerAccess) {
-                                if (mediaState.externalMedia.hasActiveSession) {
-                                    "Session détectée : ${mediaState.externalMedia.appName}"
-                                } else {
-                                    "Actif — lancez Spotify, YouTube Music ou Deezer"
+                            text = when {
+                                ext.isFmRadio -> {
+                                    val freqLabel = if (ext.fmFrequencyMhz.isNotBlank()) "${ext.fmFrequencyMhz} MHz" else "En direct"
+                                    "Radio FM détectée : ${cleanExtTitle.ifBlank { freqLabel }}"
                                 }
-                            } else {
-                                "Autorisez les notifications pour afficher titres & pochettes"
+                                mediaState.hasNotificationListenerAccess -> {
+                                    if (ext.hasActiveSession) {
+                                        "Session détectée : ${cleanExtApp.ifBlank { "Lecteur externe" }}"
+                                    } else {
+                                        "Actif — Spotify, YouTube Music, Deezer ou Radio FM"
+                                    }
+                                }
+                                else -> "Autorisez les notifications pour afficher titres & pochettes"
                             },
-                            style = MaterialTheme.typography.bodySmall,
+                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp),
                             color = TextSecondary,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
@@ -1269,9 +1410,11 @@ private fun SourceLibraryPane(
                         Button(
                             onClick = onOpenNotificationListenerSettings,
                             colors = ButtonDefaults.buttonColors(containerColor = primary, contentColor = MaterialTheme.colorScheme.onPrimary),
-                            modifier = Modifier.testTag("media_enable_notif_listener_btn"),
+                            modifier = Modifier
+                                .height(48.dp)
+                                .testTag("media_enable_notif_listener_btn"),
                         ) {
-                            Text("Activer")
+                            Text("Activer", fontSize = 14.sp)
                         }
                     }
                 }
@@ -1284,9 +1427,9 @@ private fun SourceLibraryPane(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Appareils Bluetooth appairés", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                IconButton(onClick = onRefreshBluetooth, modifier = Modifier.testTag("bt_refresh_btn")) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "Actualiser Bluetooth", tint = primary)
+                Text("Appareils Bluetooth appairés", style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp), color = TextPrimary)
+                IconButton(onClick = onRefreshBluetooth, modifier = Modifier.minimumInteractiveComponentSize().testTag("bt_refresh_btn")) {
+                    Icon(Icons.Rounded.Refresh, contentDescription = "Actualiser Bluetooth", tint = primary, modifier = Modifier.size(22.dp))
                 }
             }
 
@@ -1299,32 +1442,33 @@ private fun SourceLibraryPane(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Permission Bluetooth requise", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                        Text("Permission Bluetooth requise", style = MaterialTheme.typography.titleMedium.copy(fontSize = 16.sp), color = TextPrimary)
                         Text(
                             text = "Autorisez la connexion Bluetooth pour afficher votre smartphone et piloter la lecture AVRCP.",
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
                             color = TextSecondary,
                         )
-                        Button(onClick = onRequestBtPermission) {
-                            Text("Autoriser Bluetooth")
+                        Button(onClick = onRequestBtPermission, modifier = Modifier.height(48.dp)) {
+                            Text("Autoriser Bluetooth", fontSize = 14.sp)
                         }
                     }
                 }
             } else if (!mediaState.bluetoothEnabled) {
                 Text(
                     text = "Bluetooth désactivé sur l'autoradio. Activez-le dans les réglages système Android.",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
                     color = TextSecondary,
                 )
             } else if (mediaState.pairedBtDevices.isEmpty()) {
                 Text(
                     text = "Aucun appareil Bluetooth appairé trouvé.",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
                     color = TextSecondary,
                 )
             } else {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(mediaState.pairedBtDevices, key = { it.address }) { dev ->
+                        val sanitizedDevName = UniversalMediaManager.sanitizeMediaText(dev.name).ifBlank { "Appareil Bluetooth" }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1342,20 +1486,21 @@ private fun SourceLibraryPane(
                                 imageVector = if (dev.isConnectedA2dp) Icons.Rounded.BluetoothConnected else Icons.Rounded.Bluetooth,
                                 contentDescription = null,
                                 tint = if (dev.isConnectedA2dp) primary else TextSecondary,
+                                modifier = Modifier.size(24.dp),
                             )
                             Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(dev.name, style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                                Text(sanitizedDevName, style = MaterialTheme.typography.titleMedium.copy(fontSize = 16.sp), color = TextPrimary)
                                 Text(
                                     text = if (dev.isConnectedA2dp) "Audio A2DP connecté • ${dev.address}" else dev.address,
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 12.sp),
                                     color = if (dev.isConnectedA2dp) EmeraldOk else TextSecondary,
                                 )
                             }
                             if (dev.batteryPercent != null) {
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    Icon(Icons.Rounded.BatteryFull, contentDescription = null, tint = EmeraldOk, modifier = Modifier.size(16.dp))
-                                    Text("${dev.batteryPercent}%", style = MaterialTheme.typography.labelSmall, color = TextPrimary)
+                                    Icon(Icons.Rounded.BatteryFull, contentDescription = null, tint = EmeraldOk, modifier = Modifier.size(18.dp))
+                                    Text("${dev.batteryPercent}%", style = MaterialTheme.typography.labelMedium, color = TextPrimary)
                                 }
                             }
                         }
@@ -1731,7 +1876,7 @@ private fun LocalLibraryContent(
                 } else {
                     LazyColumn(
                         state = listState,
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.weight(1f),
                     ) {
                         items(groups, key = { "${activeCategory.name}_${it.keyLower}" }) { entry ->
@@ -1742,15 +1887,15 @@ private fun LocalLibraryContent(
                                     .background(CarbonSurfaceElevated)
                                     .border(1.dp, CarbonBorder, RoundedCornerShape(14.dp))
                                     .clickable { onSelectGroup(entry.keyLower, entry.displayName) }
-                                    .padding(horizontal = 14.dp, vertical = 14.dp)
+                                    .padding(horizontal = 16.dp, vertical = 16.dp)
                                     .testTag("media_group_row_${entry.displayName}"),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                Icon(groupIcon, contentDescription = null, tint = accent, modifier = Modifier.size(22.dp))
+                                Icon(groupIcon, contentDescription = null, tint = accent, modifier = Modifier.size(24.dp))
                                 Spacer(Modifier.width(12.dp))
                                 Text(
                                     text = entry.displayName,
-                                    style = MaterialTheme.typography.titleMedium,
+                                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp),
                                     color = TextPrimary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
@@ -1758,7 +1903,7 @@ private fun LocalLibraryContent(
                                 )
                                 Text(
                                     text = "${entry.count} morceau${if (entry.count > 1) "x" else ""}",
-                                    style = MaterialTheme.typography.labelMedium,
+                                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp),
                                     color = TextSecondary,
                                 )
                             }
@@ -1880,11 +2025,11 @@ private fun LocalLibraryContent(
                                         shape = RoundedCornerShape(14.dp),
                                     )
                                     .clickable { onPlayTrack(track) }
-                                    .padding(horizontal = if (isExpandedLayout) 14.dp else 10.dp, vertical = 10.dp)
+                                    .padding(horizontal = if (isExpandedLayout) 16.dp else 12.dp, vertical = 12.dp)
                                     .testTag("media_track_row_${track.id}"),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
-                                val thumbSize = if (isExpandedLayout) 48.dp else 40.dp
+                                val thumbSize = if (isExpandedLayout) 54.dp else 46.dp
                                 val bmp = coverThumb
                                 if (bmp != null) {
                                     Image(
@@ -1893,13 +2038,13 @@ private fun LocalLibraryContent(
                                         contentScale = ContentScale.Crop,
                                         modifier = Modifier
                                             .size(thumbSize)
-                                            .clip(RoundedCornerShape(10.dp)),
+                                            .clip(RoundedCornerShape(12.dp)),
                                     )
                                 } else {
                                     Box(
                                         modifier = Modifier
                                             .size(thumbSize)
-                                            .clip(RoundedCornerShape(10.dp))
+                                            .clip(RoundedCornerShape(12.dp))
                                             .background(CarbonSurface),
                                         contentAlignment = Alignment.Center,
                                     ) {
@@ -1907,7 +2052,7 @@ private fun LocalLibraryContent(
                                             imageVector = Icons.Rounded.MusicNote,
                                             contentDescription = null,
                                             tint = if (isCurrent) primary else TextSecondary,
-                                            modifier = Modifier.size(22.dp),
+                                            modifier = Modifier.size(24.dp),
                                         )
                                     }
                                 }
@@ -1922,7 +2067,7 @@ private fun LocalLibraryContent(
                                         ) {
                                             Text(
                                                 text = track.title,
-                                                style = MaterialTheme.typography.titleMedium,
+                                                style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp),
                                                 color = if (isCurrent) accent else TextPrimary,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
@@ -1934,7 +2079,7 @@ private fun LocalLibraryContent(
                                         }
                                         Text(
                                             text = track.artist,
-                                            style = MaterialTheme.typography.bodySmall,
+                                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp),
                                             color = if (isCurrent) TextPrimary else TextSecondary,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
@@ -1943,7 +2088,7 @@ private fun LocalLibraryContent(
                                     Spacer(Modifier.width(12.dp))
                                     Text(
                                         text = track.album.ifBlank { track.folderName },
-                                        style = MaterialTheme.typography.bodySmall,
+                                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp),
                                         color = TextSecondary,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
@@ -1952,9 +2097,9 @@ private fun LocalLibraryContent(
                                     Spacer(Modifier.width(10.dp))
                                     Text(
                                         text = track.year.ifBlank { "—" },
-                                        style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
+                                        style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily, fontSize = 13.sp),
                                         color = TextSecondary,
-                                        modifier = Modifier.width(52.dp),
+                                        modifier = Modifier.width(54.dp),
                                     )
                                 } else {
                                     Column(modifier = Modifier.weight(1f)) {
@@ -1964,7 +2109,7 @@ private fun LocalLibraryContent(
                                         ) {
                                             Text(
                                                 text = track.title,
-                                                style = MaterialTheme.typography.titleMedium,
+                                                style = MaterialTheme.typography.titleMedium.copy(fontSize = 17.sp),
                                                 color = if (isCurrent) accent else TextPrimary,
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
@@ -1987,7 +2132,7 @@ private fun LocalLibraryContent(
                                         }
                                         Text(
                                             text = metaLine,
-                                            style = MaterialTheme.typography.bodySmall,
+                                            style = MaterialTheme.typography.bodySmall.copy(fontSize = 14.sp),
                                             color = TextSecondary,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
@@ -1997,12 +2142,15 @@ private fun LocalLibraryContent(
 
                                 Text(
                                     text = AudioEngine.formatDuration(track.durationMs),
-                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                                    style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily, fontSize = 13.sp),
                                     color = if (isCurrent) accent else TextSecondary,
-                                    modifier = Modifier.padding(horizontal = 6.dp),
+                                    modifier = Modifier.padding(horizontal = 8.dp),
                                 )
-                                IconButton(onClick = { onDeleteTrack(track.id) }) {
-                                    Icon(Icons.Rounded.Delete, contentDescription = "Retirer", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                                IconButton(
+                                    onClick = { onDeleteTrack(track.id) },
+                                    modifier = Modifier.minimumInteractiveComponentSize(),
+                                ) {
+                                    Icon(Icons.Rounded.Delete, contentDescription = "Retirer", tint = TextSecondary, modifier = Modifier.size(20.dp))
                                 }
                             }
                         }
@@ -2028,21 +2176,21 @@ private fun SourceTabButton(
 
     Row(
         modifier = modifier
-            .height(44.dp)
+            .height(48.dp)
             .clip(RoundedCornerShape(14.dp))
             .background(if (selected) container else CarbonSurface)
             .border(1.dp, if (selected) primary else CarbonBorder, RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp)
+            .padding(horizontal = 10.dp)
             .testTag(testTag),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
     ) {
-        Icon(icon, contentDescription = null, tint = if (selected) accent else TextSecondary, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
+        Icon(icon, contentDescription = null, tint = if (selected) accent else TextSecondary, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(8.dp))
         Text(
             text = label,
-            style = MaterialTheme.typography.labelLarge,
+            style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp),
             color = if (selected) accent else TextSecondary,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -2058,6 +2206,7 @@ private fun EqualizerDialog(
     onSetEqEnabled: (Boolean) -> Unit,
     onApplyPreset: (Int) -> Unit,
     onSetBand: (Short, Short) -> Unit,
+    onOpenSystemDsp: () -> Unit,
 ) {
     val primary = MaterialTheme.colorScheme.primary
     val accent = MaterialTheme.colorScheme.secondary
@@ -2070,7 +2219,7 @@ private fun EqualizerDialog(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Égaliseur 5 bandes")
+                Text("Égaliseur 5 bandes", style = MaterialTheme.typography.titleLarge)
                 Switch(
                     checked = mediaState.eqEnabled,
                     onCheckedChange = onSetEqEnabled,
@@ -2079,61 +2228,96 @@ private fun EqualizerDialog(
             }
         },
         text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
+            LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 420.dp),
             ) {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    EqPreset.entries.forEach { preset ->
-                        FilterChip(
-                            selected = mediaState.eqPresetIndex == preset.index,
-                            onClick = { onApplyPreset(preset.index) },
-                            label = { Text(preset.label, maxLines = 1) },
-                        )
+                item(key = "eq_presets") {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        EqPreset.entries.forEach { preset ->
+                            FilterChip(
+                                selected = mediaState.eqPresetIndex == preset.index,
+                                onClick = { onApplyPreset(preset.index) },
+                                label = { Text(preset.label, fontSize = 14.sp, maxLines = 1) },
+                            )
+                        }
                     }
                 }
 
-                mediaState.eqBands.forEach { band ->
+                items(mediaState.eqBands, key = { it.index.toInt() }) { band ->
                     val freqText = if (band.centerFreqHz >= 1000) {
                         val k = band.centerFreqHz / 1000f
                         if (k % 1f == 0f) "${k.toInt()} kHz" else "%.1f kHz".format(k)
                     } else {
                         "${band.centerFreqHz} Hz"
                     }
+                    val sliderMin = minOf(band.minMb.toFloat(), -1500f)
+                    val sliderMax = maxOf(band.maxMb.toFloat(), 1500f)
                     val db = band.levelMb / 100
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
                             text = freqText,
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.labelMedium.copy(fontSize = 14.sp),
                             color = accent,
-                            modifier = Modifier.width(52.dp),
+                            modifier = Modifier.width(62.dp),
                         )
                         Slider(
-                            value = band.levelMb.toFloat(),
+                            value = band.levelMb.toFloat().coerceIn(sliderMin, sliderMax),
                             onValueChange = { onSetBand(band.index, it.toInt().toShort()) },
                             enabled = mediaState.eqEnabled,
-                            valueRange = band.minMb.toFloat()..band.maxMb.toFloat(),
+                            valueRange = sliderMin..sliderMax,
+                            colors = SliderDefaults.colors(
+                                thumbColor = primary,
+                                activeTrackColor = primary,
+                            ),
                             modifier = Modifier.weight(1f),
                         )
                         Text(
                             text = "${if (db > 0) "+" else ""}${db} dB",
-                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                            style = MaterialTheme.typography.labelMedium.copy(
+                                fontFamily = JetBrainsMonoFamily,
+                                fontSize = 14.sp,
+                            ),
                             color = TextPrimary,
-                            modifier = Modifier.width(48.dp),
+                            modifier = Modifier.width(56.dp),
                         )
+                    }
+                }
+
+                item(key = "eq_open_dsp") {
+                    Spacer(Modifier.height(4.dp))
+                    OutlinedButton(
+                        onClick = onOpenSystemDsp,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(50.dp)
+                            .testTag("media_eq_open_dsp_btn"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Equalizer,
+                            contentDescription = null,
+                            tint = accent,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Ouvrir DSP Autoradio", color = accent, fontSize = 14.sp, maxLines = 1)
                     }
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Fermer") }
+            TextButton(onClick = onDismiss) { Text("Fermer", fontSize = 15.sp) }
         },
     )
 }
@@ -2157,10 +2341,10 @@ private fun ImportAudioDialog(
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
                     text = "Choisissez la source audio à indexer dans votre bibliothèque locale :",
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp),
                     color = TextSecondary,
                 )
                 Button(
@@ -2169,29 +2353,29 @@ private fun ImportAudioDialog(
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp)
+                        .height(54.dp)
                         .testTag("media_dialog_import_folder_btn"),
                 ) {
-                    Icon(Icons.Rounded.CreateNewFolder, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Rounded.CreateNewFolder, contentDescription = null, modifier = Modifier.size(22.dp))
                     Spacer(Modifier.width(10.dp))
-                    Text("Dossier USB / SD", maxLines = 1)
+                    Text("Dossier USB / SD", fontSize = 15.sp, maxLines = 1)
                 }
                 OutlinedButton(
                     onClick = onPickFiles,
                     shape = RoundedCornerShape(14.dp),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(50.dp)
+                        .height(54.dp)
                         .testTag("media_dialog_import_files_btn"),
                 ) {
-                    Icon(Icons.Rounded.AudioFile, contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Rounded.AudioFile, contentDescription = null, tint = accent, modifier = Modifier.size(22.dp))
                     Spacer(Modifier.width(10.dp))
-                    Text("Fichiers audio", color = accent, maxLines = 1)
+                    Text("Fichiers audio", color = accent, fontSize = 15.sp, maxLines = 1)
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Fermer") }
+            TextButton(onClick = onDismiss) { Text("Fermer", fontSize = 15.sp) }
         },
     )
 }
