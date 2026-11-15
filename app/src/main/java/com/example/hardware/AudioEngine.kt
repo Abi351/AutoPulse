@@ -12,6 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.database.ContentObserver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
@@ -22,8 +23,11 @@ import android.media.MediaPlayer
 import android.media.audiofx.Equalizer
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.DocumentsContract
+import android.provider.Settings
 import android.view.KeyEvent
 import androidx.core.content.ContextCompat
 import com.example.data.db.AudioTrackEntity
@@ -205,6 +209,7 @@ class AudioEngine(private val context: Context) {
     private var mediaPlayer: MediaPlayer? = null
     private var equalizer: Equalizer? = null
     private var progressJob: Job? = null
+    private var duckingJob: Job? = null
     private var playlist: List<AudioTrackEntity> = emptyList()
     private var a2dpProxy: BluetoothA2dp? = null
     private var focusRequest: AudioFocusRequest? = null
@@ -241,6 +246,23 @@ class AudioEngine(private val context: Context) {
         }
     }
 
+    private val volumeReceiver = object : BroadcastReceiver() {
+        override fun onReceive(ctx: Context, intent: Intent) {
+            if (intent.action == ACTION_VOLUME_CHANGED) {
+                val streamType = intent.getIntExtra(EXTRA_VOLUME_STREAM_TYPE, -1)
+                if (streamType == AudioManager.STREAM_MUSIC || streamType == -1) {
+                    refreshVolume()
+                }
+            }
+        }
+    }
+
+    private val volumeContentObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        override fun onChange(selfChange: Boolean) {
+            refreshVolume()
+        }
+    }
+
     init {
         val filter = IntentFilter().apply {
             addAction(BluetoothA2dp.ACTION_CONNECTION_STATE_CHANGED)
@@ -253,6 +275,21 @@ class AudioEngine(private val context: Context) {
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
             context.registerReceiver(btReceiver, filter)
+        }
+
+        val volFilter = IntentFilter(ACTION_VOLUME_CHANGED)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(volumeReceiver, volFilter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            context.registerReceiver(volumeReceiver, volFilter)
+        }
+        runCatching {
+            context.contentResolver.registerContentObserver(
+                Settings.System.CONTENT_URI,
+                true,
+                volumeContentObserver,
+            )
         }
 
         runCatching {
@@ -319,9 +356,18 @@ class AudioEngine(private val context: Context) {
     }
 
     fun playTrack(track: AudioTrackEntity) {
-        _state.update { it.copy(sourceMode = AudioSourceMode.LOCAL) }
+        _state.update {
+            it.copy(
+                sourceMode = AudioSourceMode.LOCAL,
+                currentTrack = track,
+                currentAlbumArt = null,
+                positionMs = 0L,
+                durationMs = track.durationMs,
+            )
+        }
         requestAudioFocus()
         releasePlayerOnly()
+        loadTrackArtAsync(track)
 
         val uri = Uri.parse(track.uriString)
         val player = MediaPlayer()
@@ -355,7 +401,6 @@ class AudioEngine(private val context: Context) {
             }
             player.prepareAsync()
             mediaPlayer = player
-            loadTrackArtAsync(track)
         } catch (_: Exception) {
             player.release()
             _state.update { it.copy(isPlaying = false) }
@@ -673,6 +718,30 @@ class AudioEngine(private val context: Context) {
         _state.update { it.copy(mediaVolume = cur, maxVolume = max, isMuted = cur == 0) }
     }
 
+    fun triggerOverspeedAudioDucking() {
+        if (duckingJob?.isActive == true) return
+        val originalVolume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
+        if (originalVolume <= 1) return
+
+        val duckedVolume = kotlin.math.round(originalVolume * 0.70f)
+            .toInt()
+            .coerceIn(1, originalVolume - 1)
+
+        duckingJob = scope.launch {
+            try {
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, duckedVolume, 0)
+                refreshVolume()
+                delay(2_000L)
+            } finally {
+                runCatching {
+                    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, originalVolume, 0)
+                    refreshVolume()
+                }
+                duckingJob = null
+            }
+        }
+    }
+
     @SuppressLint("MissingPermission")
     fun refreshBluetoothDevices() {
         val hasPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -919,15 +988,21 @@ class AudioEngine(private val context: Context) {
     }
 
     fun release() {
+        duckingJob?.cancel()
         releasePlayerOnly()
         universalMedia.release()
         runCatching { context.unregisterReceiver(btReceiver) }
+        runCatching { context.unregisterReceiver(volumeReceiver) }
+        runCatching { context.contentResolver.unregisterContentObserver(volumeContentObserver) }
         runCatching {
             a2dpProxy?.let { bluetoothAdapter?.closeProfileProxy(BluetoothProfile.A2DP, it) }
         }
     }
 
     companion object {
+        const val ACTION_VOLUME_CHANGED = "android.media.VOLUME_CHANGED_ACTION"
+        const val EXTRA_VOLUME_STREAM_TYPE = "android.media.EXTRA_VOLUME_STREAM_TYPE"
+
         fun formatDuration(ms: Long): String {
             val totalSec = (ms / 1000L).coerceAtLeast(0L)
             val min = totalSec / 60L

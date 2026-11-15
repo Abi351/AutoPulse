@@ -1,6 +1,7 @@
 package com.example
 
 import android.Manifest
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
@@ -73,7 +74,6 @@ import com.example.data.PreferencesRepository
 import com.example.hardware.FloatingPillService
 import com.example.hardware.ScreenDimmerService
 import com.example.ui.components.RailClockBadge
-import com.example.ui.components.TopStatusBar
 import com.example.ui.screens.AppLibraryOverlay
 import com.example.ui.screens.CockpitHomeScreen
 import com.example.ui.screens.MediaScreen
@@ -113,6 +113,8 @@ class MainActivity : ComponentActivity() {
         ViewModelProvider(this)[AutoPulseViewModel::class.java]
     }
 
+    private var homeReturnTrigger by mutableIntStateOf(0)
+
     private val swcKeyCodes = setOf(
         KeyEvent.KEYCODE_MEDIA_NEXT,
         KeyEvent.KEYCODE_MEDIA_PREVIOUS,
@@ -130,9 +132,20 @@ class MainActivity : ComponentActivity() {
                 AccentThemeColor.fromId(settings.accentColorId)
             }
             AutoPulseTheme(accentColor = accentColor) {
-                AutoPulseAppRoot(viewModel = autoPulseViewModel)
+                AutoPulseAppRoot(
+                    viewModel = autoPulseViewModel,
+                    homeReturnTrigger = homeReturnTrigger,
+                    onReturnedHome = { applyFullscreenMode() },
+                )
             }
         }
+        applyFullscreenMode()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        homeReturnTrigger += 1
         applyFullscreenMode()
     }
 
@@ -167,9 +180,12 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun AutoPulseAppRoot(
     viewModel: AutoPulseViewModel,
+    homeReturnTrigger: Int = 0,
+    onReturnedHome: () -> Unit = {},
 ) {
     val mediaState by viewModel.mediaState.collectAsStateWithLifecycle()
     val speedState by viewModel.speedState.collectAsStateWithLifecycle()
+    val autoSpeedLimitState by viewModel.autoSpeedLimitState.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val tracks by viewModel.tracks.collectAsStateWithLifecycle()
     val tripStats by viewModel.tripStats.collectAsStateWithLifecycle()
@@ -178,10 +194,12 @@ fun AutoPulseAppRoot(
     val isDefaultLauncher by viewModel.isDefaultLauncher.collectAsStateWithLifecycle()
     val hasOverlayPermission by viewModel.hasOverlayPermission.collectAsStateWithLifecycle()
     val coverSyncState by viewModel.coverSyncState.collectAsStateWithLifecycle()
+    val showBreakReminder by viewModel.showBreakReminder.collectAsStateWithLifecycle()
     val feedback by viewModel.feedbackMessage.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     var showAppLibrary by remember { mutableStateOf(false) }
+    var closeMediaOverlaysSignal by remember { mutableIntStateOf(0) }
     var nowMinutes by remember { mutableIntStateOf(currentTimeMinutes()) }
 
     LaunchedEffect(Unit) {
@@ -271,6 +289,20 @@ fun AutoPulseAppRoot(
         }
     }
 
+    LaunchedEffect(homeReturnTrigger) {
+        if (homeReturnTrigger > 0) {
+            showAppLibrary = false
+            closeMediaOverlaysSignal += 1
+            navController.navigate(ROUTE_COCKPIT) {
+                popUpTo(ROUTE_COCKPIT) {
+                    inclusive = false
+                }
+                launchSingleTop = true
+            }
+            onReturnedHome()
+        }
+    }
+
     val accent = MaterialTheme.colorScheme.secondary
     val container = MaterialTheme.colorScheme.primaryContainer
 
@@ -284,17 +316,6 @@ fun AutoPulseAppRoot(
             containerColor = ObsidianBg,
             snackbarHost = { SnackbarHost(hostState = snackbarHostState) },
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            topBar = {
-                if (currentRoute == ROUTE_COCKPIT) {
-                    TopStatusBar(
-                        btDeviceName = mediaState.connectedBtDevice?.name,
-                        externalAppName = mediaState.externalMedia.takeIf { it.hasActiveSession }?.appName,
-                        isMuted = mediaState.isMuted,
-                        onToggleMute = { viewModel.audioEngine.toggleMute() },
-                        onOpenBluetooth = { navigateTo(ROUTE_MEDIA) },
-                    )
-                }
-            },
         ) { innerPadding ->
             Row(
                 modifier = Modifier
@@ -332,20 +353,22 @@ fun AutoPulseAppRoot(
                                 modifier = Modifier.testTag(dest.testTag),
                             )
                         }
-                        NavigationRailItem(
-                            selected = showAppLibrary,
-                            onClick = { showAppLibrary = true },
-                            icon = { Icon(Icons.Rounded.Apps, contentDescription = "Bibliothèque d'applications") },
-                            label = { Text("Apps", maxLines = 1) },
-                            colors = NavigationRailItemDefaults.colors(
-                                selectedIconColor = accent,
-                                selectedTextColor = accent,
-                                indicatorColor = container,
-                                unselectedIconColor = TextSecondary,
-                                unselectedTextColor = TextSecondary,
-                            ),
-                            modifier = Modifier.testTag("nav_item_apps"),
-                        )
+                        if (currentRoute != ROUTE_COCKPIT) {
+                            NavigationRailItem(
+                                selected = showAppLibrary,
+                                onClick = { showAppLibrary = true },
+                                icon = { Icon(Icons.Rounded.Apps, contentDescription = "Bibliothèque d'applications") },
+                                label = { Text("Apps", maxLines = 1) },
+                                colors = NavigationRailItemDefaults.colors(
+                                    selectedIconColor = accent,
+                                    selectedTextColor = accent,
+                                    indicatorColor = container,
+                                    unselectedIconColor = TextSecondary,
+                                    unselectedTextColor = TextSecondary,
+                                ),
+                                modifier = Modifier.testTag("nav_item_apps"),
+                            )
+                        }
                     }
                 }
 
@@ -362,11 +385,20 @@ fun AutoPulseAppRoot(
                         CockpitHomeScreen(
                             mediaState = mediaState,
                             speedState = speedState,
-                            speedLimitKmh = settings.speedLimitKmh,
+                            settings = settings,
+                            autoSpeedLimitState = autoSpeedLimitState,
+                            showBreakReminder = showBreakReminder,
                             dockApps = dockApps,
                             getCachedIcon = { viewModel.getCachedAppIcon(it) },
                             loadAppIcon = { viewModel.loadAppIcon(it) },
                             onSelectSpeedLimit = { viewModel.setSpeedLimitKmh(it) },
+                            onSelectAutoDetectionSeconds = { viewModel.setAutoSpeedDetectionSeconds(it) },
+                            onSelectAlertToleranceKmh = { viewModel.setSpeedAlertToleranceKmh(it) },
+                            onSelectSpeedAlertType = { viewModel.setSpeedAlertType(it) },
+                            onSelectCalibrationOffsetKmh = { viewModel.setSpeedCalibrationOffsetKmh(it) },
+                            onSetBreakReminderEnabled = { viewModel.setBreakReminderEnabled(it) },
+                            onDismissBreakReminder = { viewModel.dismissBreakReminder() },
+                            onTriggerSpeedAlertDucking = { viewModel.triggerSpeedAlertDucking() },
                             onOpenMedia = { navigateTo(ROUTE_MEDIA) },
                             onTogglePlayPause = { viewModel.audioEngine.togglePlayPause() },
                             onNextTrack = { viewModel.audioEngine.nextTrack() },
@@ -400,6 +432,7 @@ fun AutoPulseAppRoot(
                             onRefreshBluetooth = { viewModel.audioEngine.refreshBluetoothDevices() },
                             onRequestBtPermission = { permissionLauncher.launch(permissionsToRequest) },
                             onOpenNotificationListenerSettings = { viewModel.openNotificationListenerSettings() },
+                            closeOverlaysSignal = closeMediaOverlaysSignal,
                         )
                     }
                     composable(ROUTE_TRIP) {

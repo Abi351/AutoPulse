@@ -11,14 +11,17 @@ import android.os.SystemClock
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.BREAK_REMINDER_INTERVAL_SECONDS
 import com.example.data.HeadUnitSettings
 import com.example.data.MAX_DOCK_APPS
 import com.example.data.PreferencesRepository
+import com.example.data.SPEED_LIMIT_AUTO
 import com.example.data.TripStats
 import com.example.data.db.AudioTrackEntity
 import com.example.data.db.AutoPulseDatabase
 import com.example.hardware.AudioEngine
 import com.example.hardware.AudioSourceMode
+import com.example.hardware.AutoSpeedLimitState
 import com.example.hardware.FloatingPillService
 import com.example.hardware.InstalledAppInfo
 import com.example.hardware.InstalledAppsManager
@@ -69,6 +72,7 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
 
     val mediaState: StateFlow<MediaPlayerState> = audioEngine.state
     val speedState: StateFlow<SpeedGpsState> = locationEngine.state
+    val autoSpeedLimitState: StateFlow<AutoSpeedLimitState> = locationEngine.autoSpeedLimitState
     val installedApps: StateFlow<List<InstalledAppInfo>> = appsManager.apps
 
     val settings: StateFlow<HeadUnitSettings> = prefsRepo.settingsFlow
@@ -97,10 +101,14 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
     private val _feedbackMessage = MutableStateFlow<String?>(null)
     val feedbackMessage: StateFlow<String?> = _feedbackMessage.asStateFlow()
 
+    private val _showBreakReminder = MutableStateFlow(false)
+    val showBreakReminder: StateFlow<Boolean> = _showBreakReminder.asStateFlow()
+
     private var wakeResumeJob: Job? = null
     private var eqBandSaveJob: Job? = null
     private var coverSyncJob: Job? = null
     private var tripLoaded = false
+    private var nextBreakReminderAtSeconds = BREAK_REMINDER_INTERVAL_SECONDS
 
     private val screenWakeReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context, intent: Intent) {
@@ -133,6 +141,30 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
             }
             .launchIn(viewModelScope)
 
+        prefsRepo.settingsFlow
+            .map { it.speedLimitKmh == SPEED_LIMIT_AUTO }
+            .distinctUntilChanged()
+            .onEach { isAuto ->
+                locationEngine.setAutoSpeedLimitActive(isAuto)
+            }
+            .launchIn(viewModelScope)
+
+        prefsRepo.settingsFlow
+            .map { it.autoSpeedDetectionSeconds }
+            .distinctUntilChanged()
+            .onEach { seconds ->
+                locationEngine.setAutoDetectionSeconds(seconds)
+            }
+            .launchIn(viewModelScope)
+
+        prefsRepo.settingsFlow
+            .map { it.speedCalibrationOffsetKmh }
+            .distinctUntilChanged()
+            .onEach { offset ->
+                locationEngine.setSpeedCalibrationOffset(offset)
+            }
+            .launchIn(viewModelScope)
+
         locationEngine.tripFixes
             .onEach { fix ->
                 _tripStats.update { cur ->
@@ -147,6 +179,8 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             val savedTrip = prefsRepo.tripStatsFlow.first()
             _tripStats.value = savedTrip
+            nextBreakReminderAtSeconds =
+                ((savedTrip.drivingSeconds / BREAK_REMINDER_INTERVAL_SECONDS) + 1L) * BREAK_REMINDER_INTERVAL_SECONDS
             tripLoaded = true
 
             var secondsSincePersist = 0
@@ -154,7 +188,17 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
                 delay(1_000L)
                 _tripStats.update { cur -> cur.copy(drivingSeconds = cur.drivingSeconds + 1L) }
 
+                val currentTrip = _tripStats.value
                 val currentSettings = settings.value
+                if (!currentSettings.breakReminderEnabled) {
+                    if (_showBreakReminder.value) {
+                        _showBreakReminder.value = false
+                    }
+                } else if (currentTrip.drivingSeconds >= nextBreakReminderAtSeconds) {
+                    _showBreakReminder.value = true
+                    nextBreakReminderAtSeconds += BREAK_REMINDER_INTERVAL_SECONDS
+                }
+
                 val targetVol = sdvcController.evaluate(
                     enabled = currentSettings.sdvcEnabled,
                     speedKmh = speedState.value.speedKmh,
@@ -215,10 +259,16 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
     fun resetTrip() {
         locationEngine.resetTripAnchor()
         _tripStats.value = TripStats()
+        _showBreakReminder.value = false
+        nextBreakReminderAtSeconds = BREAK_REMINDER_INTERVAL_SECONDS
         viewModelScope.launch {
             prefsRepo.resetTripStats()
             postFeedback("Nouveau trajet démarré (compteurs remis à zéro)")
         }
+    }
+
+    fun dismissBreakReminder() {
+        _showBreakReminder.value = false
     }
 
     fun refreshOverlayPermission() {
@@ -304,7 +354,7 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
         if (uris.isEmpty()) return
         viewModelScope.launch {
             val extracted = audioEngine.extractTracksFromUris(uris)
-            val newOnes = extracted.filter { !audioTrackDao.existsByUri(it.uriString) }
+            val newOnes = deduplicateTracksAgainstDb(extracted, audioTrackDao.getAllOnce())
             if (newOnes.isNotEmpty()) {
                 audioTrackDao.insertAll(newOnes)
                 postFeedback("${newOnes.size} piste(s) ajoutée(s) à la bibliothèque locale")
@@ -317,7 +367,7 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
     fun importAudioFolder(treeUri: Uri) {
         viewModelScope.launch {
             val found = audioEngine.scanFolderTree(treeUri)
-            val newOnes = found.filter { !audioTrackDao.existsByUri(it.uriString) }
+            val newOnes = deduplicateTracksAgainstDb(found, audioTrackDao.getAllOnce())
             if (newOnes.isNotEmpty()) {
                 audioTrackDao.insertAll(newOnes)
                 postFeedback("${newOnes.size} piste(s) importée(s) depuis le dossier")
@@ -406,12 +456,14 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
                     return@launch
                 }
 
-                val result = MetadataFetcher.fetchOnlineMetadataForTrack(
-                    context = appCtx,
-                    track = track,
-                    forceRedownload = forceRedownload,
-                )
-                if (result.wasUpdated) {
+                val result = runCatching {
+                    MetadataFetcher.fetchOnlineMetadataForTrack(
+                        context = appCtx,
+                        track = track,
+                        forceRedownload = forceRedownload,
+                    )
+                }.getOrNull()
+                if (result != null && result.wasUpdated) {
                     audioTrackDao.updateTrack(result.track)
                     updated++
                 }
@@ -422,6 +474,9 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
                     updatedCount = updated,
                     statusMessage = "Analyse : ${idx + 1} / ${allTracks.size} morceaux ($updated mis à jour)",
                 )
+                if (idx < allTracks.lastIndex) {
+                    delay(MetadataFetcher.REQUEST_THROTTLE_MS)
+                }
             }
 
             _coverSyncState.value = CoverSyncUiState(
@@ -501,7 +556,39 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun setSpeedLimitKmh(limitKmh: Int) {
+        if (limitKmh == SPEED_LIMIT_AUTO) {
+            locationEngine.resetAutoSpeedLimit()
+        }
         viewModelScope.launch { prefsRepo.setSpeedLimitKmh(limitKmh) }
+    }
+
+    fun setAutoSpeedDetectionSeconds(seconds: Int) {
+        locationEngine.setAutoDetectionSeconds(seconds)
+        viewModelScope.launch { prefsRepo.setAutoSpeedDetectionSeconds(seconds) }
+    }
+
+    fun setSpeedAlertToleranceKmh(toleranceKmh: Int) {
+        viewModelScope.launch { prefsRepo.setSpeedAlertToleranceKmh(toleranceKmh) }
+    }
+
+    fun setSpeedAlertType(typeId: String) {
+        viewModelScope.launch { prefsRepo.setSpeedAlertType(typeId) }
+    }
+
+    fun setSpeedCalibrationOffsetKmh(offsetKmh: Int) {
+        locationEngine.setSpeedCalibrationOffset(offsetKmh)
+        viewModelScope.launch { prefsRepo.setSpeedCalibrationOffsetKmh(offsetKmh) }
+    }
+
+    fun setBreakReminderEnabled(enabled: Boolean) {
+        if (!enabled) {
+            _showBreakReminder.value = false
+        }
+        viewModelScope.launch { prefsRepo.setBreakReminderEnabled(enabled) }
+    }
+
+    fun triggerSpeedAlertDucking() {
+        audioEngine.triggerOverspeedAudioDucking()
     }
 
     fun setFloatingPillEnabled(enabled: Boolean) {
@@ -520,5 +607,34 @@ class AutoPulseViewModel(application: Application) : AndroidViewModel(applicatio
         audioEngine.release()
         appsManager.release()
         locationEngine.release()
+    }
+
+    companion object {
+        fun extractNormalizedFileKey(uriString: String): String {
+            val decoded = runCatching { Uri.decode(uriString) }.getOrDefault(uriString)
+            val docPath = decoded.substringAfterLast("/document/", missingDelimiterValue = "")
+            if (docPath.isNotBlank()) return docPath.lowercase()
+            return decoded.substringAfterLast('/').lowercase()
+        }
+
+        fun deduplicateTracksAgainstDb(
+            candidates: List<AudioTrackEntity>,
+            existing: List<AudioTrackEntity>,
+        ): List<AudioTrackEntity> {
+            val existingUris = existing.map { it.uriString }.toHashSet()
+            val existingPaths = existing.map { extractNormalizedFileKey(it.uriString) }.toHashSet()
+            val result = mutableListOf<AudioTrackEntity>()
+
+            for (track in candidates) {
+                val pathKey = extractNormalizedFileKey(track.uriString)
+                if (track.uriString in existingUris || pathKey in existingPaths) {
+                    continue
+                }
+                existingUris.add(track.uriString)
+                existingPaths.add(pathKey)
+                result.add(track)
+            }
+            return result
+        }
     }
 }

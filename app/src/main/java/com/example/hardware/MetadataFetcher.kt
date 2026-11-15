@@ -8,15 +8,19 @@ import android.net.NetworkCapabilities
 import android.os.Build
 import com.example.data.db.AudioTrackEntity
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.text.Normalizer
 
 data class FetchTrackResult(
     val track: AudioTrackEntity,
@@ -32,6 +36,11 @@ object MetadataFetcher {
     private val AUDIO_EXT_REGEX = Regex("\\.(mp3|flac|m4a|wav|ogg|aac|wma|opus)$", RegexOption.IGNORE_CASE)
     private val LEADING_TRACK_NUM_REGEX = Regex("^\\s*\\d{1,3}\\s*[-._)]\\s*")
     private val BRACKETS_REGEX = Regex("\\[[^\\]]*]|\\([^)]*\\)")
+    private val NOISE_WORDS_REGEX = Regex(
+        "\\b(official\\s+video|official\\s+audio|video\\s+song|full\\s+video|lyric\\s+video|lyrical|full\\s+song|audio|hd|4k|hq|feat\\.?|ft\\.?)\\b",
+        RegexOption.IGNORE_CASE,
+    )
+    private val SEPARATORS_REGEX = Regex("[_|/]+")
     private val MULTI_SPACE_REGEX = Regex("\\s+")
     private val YEAR_REGEX = Regex("(19|20)\\d{2}")
 
@@ -52,8 +61,10 @@ object MetadataFetcher {
         cleaned = AUDIO_EXT_REGEX.replace(cleaned, "")
         cleaned = LEADING_TRACK_NUM_REGEX.replace(cleaned, "")
         cleaned = BRACKETS_REGEX.replace(cleaned, " ")
-        cleaned = cleaned.replace('_', ' ')
-        cleaned = MULTI_SPACE_REGEX.replace(cleaned, " ").trim()
+        cleaned = SEPARATORS_REGEX.replace(cleaned, " ")
+        cleaned = NOISE_WORDS_REGEX.replace(cleaned, " ")
+        cleaned = cleaned.replace(" - ", " ")
+        cleaned = MULTI_SPACE_REGEX.replace(cleaned, " ").trim(' ', '-', '.', ',')
         return cleaned.ifBlank { raw.substringBeforeLast('.').ifBlank { "Piste audio" } }
     }
 
@@ -67,13 +78,81 @@ object MetadataFetcher {
         ) {
             ""
         } else {
-            BRACKETS_REGEX.replace(artist, " ").replace('_', ' ')
-                .let { MULTI_SPACE_REGEX.replace(it, " ").trim() }
+            val noNoiseArtist = NOISE_WORDS_REGEX.replace(
+                BRACKETS_REGEX.replace(artist, " "),
+                " ",
+            )
+            MULTI_SPACE_REGEX.replace(SEPARATORS_REGEX.replace(noNoiseArtist, " "), " ").trim()
         }
         return listOf(cleanArtist, cleanTitle)
             .filter { it.isNotBlank() }
             .joinToString(" ")
             .trim()
+    }
+
+    /**
+     * Requête simplifiée contenant les 3 ou 4 premiers mots significatifs du titre nettoyé.
+     */
+    fun buildSimplifiedQuery(title: String): String {
+        val cleaned = cleanTrackName(title)
+        val words = cleaned.split(' ')
+            .map { it.trim('-', '.', ',', '!', '?') }
+            .filter { it.length > 1 }
+        val significant = if (words.isNotEmpty()) words else cleaned.split(' ').filter { it.isNotBlank() }
+        return significant.take(4).joinToString(" ").trim()
+    }
+
+    fun isUnknownArtist(artist: String?): Boolean {
+        if (artist.isNullOrBlank()) return true
+        val trimmed = artist.trim()
+        return trimmed.equals("Artiste inconnu", ignoreCase = true) ||
+            trimmed.equals("Unknown", ignoreCase = true) ||
+            trimmed.equals("<unknown>", ignoreCase = true) ||
+            trimmed.equals("Unknown Artist", ignoreCase = true)
+    }
+
+    private fun normalizeForMatch(raw: String): String {
+        val decomposed = Normalizer.normalize(raw.lowercase(), Normalizer.Form.NFD)
+        return decomposed
+            .replace(Regex("\\p{InCombiningDiacriticalMarks}+"), "")
+            .replace(Regex("[^a-z0-9\\s]"), " ")
+            .replace(MULTI_SPACE_REGEX, " ")
+            .trim()
+    }
+
+    private fun extractKeywords(raw: String): List<String> {
+        val stopWords = setOf("the", "and", "les", "des", "une", "for", "with", "feat", "ft")
+        val tokens = normalizeForMatch(raw).split(' ').filter { it.isNotBlank() }
+        val longTokens = tokens.filter { it.length >= 2 && it !in stopWords }
+        return if (longTokens.isNotEmpty()) longTokens else tokens
+    }
+
+    /**
+     * Vérifie qu'un résultat iTunes correspond à l'artiste déjà connu (et idéalement au titre).
+     * Empêche d'écraser ou d'associer une pochette d'un autre artiste pour un titre homonyme.
+     */
+    fun doesItunesResultMatch(
+        knownArtist: String,
+        trackTitle: String,
+        apiArtistName: String?,
+        apiTrackName: String?,
+    ): Boolean {
+        if (isUnknownArtist(knownArtist)) return true
+        val normApiArtist = normalizeForMatch(apiArtistName.orEmpty())
+        val normApiTrack = normalizeForMatch(apiTrackName.orEmpty())
+        if (normApiArtist.isBlank() && normApiTrack.isBlank()) return false
+
+        val artistKeywords = extractKeywords(cleanTrackName(knownArtist))
+        val artistMatches = artistKeywords.isNotEmpty() && artistKeywords.any { kw ->
+            normApiArtist.contains(kw) || normApiTrack.contains(kw)
+        }
+        if (!artistMatches) return false
+
+        val titleKeywords = extractKeywords(cleanTrackName(trackTitle))
+        if (titleKeywords.isEmpty()) return true
+        return titleKeywords.any { kw ->
+            normApiTrack.contains(kw) || normApiArtist.contains(kw)
+        }
     }
 
     fun extractYear(raw: String?): String {
@@ -164,8 +243,9 @@ object MetadataFetcher {
         forceRedownload: Boolean,
     ): FetchTrackResult = withContext(Dispatchers.IO) {
         val hasValidCover = !track.coverPath.isNullOrBlank() && File(track.coverPath).exists()
+        val knownArtist = !isUnknownArtist(track.artist)
         val hasCompleteInfo = hasValidCover &&
-            !track.artist.equals("Artiste inconnu", ignoreCase = true) &&
+            knownArtist &&
             !track.genre.equals("Inconnu", ignoreCase = true) &&
             track.year.isNotBlank()
 
@@ -173,14 +253,30 @@ object MetadataFetcher {
             return@withContext FetchTrackResult(track, wasUpdated = false)
         }
 
+        val cleanTitle = cleanTrackName(track.title)
         val primaryQuery = buildSearchQuery(track.title, track.artist)
-        val fallbackQuery = cleanTrackName(track.title)
-        val item = queryItunesSong(primaryQuery)
-            ?: if (fallbackQuery.isNotBlank() && fallbackQuery != primaryQuery) {
-                queryItunesSong(fallbackQuery)
-            } else {
-                null
-            }
+        val simplifiedQuery = if (knownArtist) {
+            listOf(
+                cleanTrackName(track.artist),
+                buildSimplifiedQuery(cleanTitle),
+            ).filter { it.isNotBlank() }.joinToString(" ").trim()
+        } else {
+            buildSimplifiedQuery(cleanTitle)
+        }
+
+        var item = findBestItunesMatch(
+            query = primaryQuery,
+            knownArtist = track.artist,
+            trackTitle = cleanTitle,
+        )
+        if (item == null && simplifiedQuery.isNotBlank() && simplifiedQuery != primaryQuery) {
+            delay(400L)
+            item = findBestItunesMatch(
+                query = simplifiedQuery,
+                knownArtist = track.artist,
+                trackTitle = cleanTitle,
+            )
+        }
 
         if (item == null) {
             return@withContext FetchTrackResult(track, wasUpdated = false)
@@ -196,7 +292,7 @@ object MetadataFetcher {
 
         var newCoverPath = track.coverPath
         if ((forceRedownload || !hasValidCover) && !artUrl256.isNullOrBlank()) {
-            val imageBytes = downloadBytes(artUrl256)
+            val imageBytes = downloadBytesWithRetry(artUrl256)
             if (imageBytes != null) {
                 val saved = compressAndSaveCoverRgb565(
                     context = context,
@@ -209,10 +305,8 @@ object MetadataFetcher {
             }
         }
 
-        val updatedArtist = if (
-            apiArtist != null &&
-            (track.artist.isBlank() || track.artist.equals("Artiste inconnu", ignoreCase = true))
-        ) {
+        // Ne jamais écraser un artiste déjà valide par un autre artiste
+        val updatedArtist = if (apiArtist != null && !knownArtist) {
             apiArtist
         } else {
             track.artist
@@ -263,56 +357,131 @@ object MetadataFetcher {
         FetchTrackResult(updatedTrack, wasUpdated = updatedTrack != track)
     }
 
-    private fun queryItunesSong(query: String): JSONObject? {
-        if (query.isBlank()) return null
-        return runCatching {
-            val encoded = URLEncoder.encode(query, "UTF-8")
-            val endpoint = "https://itunes.apple.com/search?term=$encoded&media=music&entity=song&limit=1"
-            val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = READ_TIMEOUT_MS
-                setRequestProperty("User-Agent", "AutoPulseHeadUnit/1.0")
-            }
-            try {
-                if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
-                val jsonText = conn.inputStream.bufferedReader().use { it.readText() }
-                val root = JSONObject(jsonText)
-                val results = root.optJSONArray("results") ?: return null
-                if (results.length() == 0) return null
-                results.optJSONObject(0)
-            } finally {
-                conn.disconnect()
-            }
-        }.getOrNull()
+    private suspend fun findBestItunesMatch(
+        query: String,
+        knownArtist: String,
+        trackTitle: String,
+    ): JSONObject? {
+        val candidates = queryItunesSongsWithRetry(query)
+        if (candidates.isEmpty()) return null
+        if (isUnknownArtist(knownArtist)) {
+            return candidates.firstOrNull()
+        }
+        return candidates.firstOrNull { obj ->
+            doesItunesResultMatch(
+                knownArtist = knownArtist,
+                trackTitle = trackTitle,
+                apiArtistName = obj.optString("artistName"),
+                apiTrackName = obj.optString("trackName"),
+            )
+        }
     }
 
-    private fun downloadBytes(urlString: String): ByteArray? {
-        return runCatching {
-            val conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = CONNECT_TIMEOUT_MS
-                readTimeout = READ_TIMEOUT_MS
-                setRequestProperty("User-Agent", "AutoPulseHeadUnit/1.0")
-            }
-            try {
-                if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
-                conn.inputStream.use { input ->
-                    val buffer = ByteArrayOutputStream()
-                    val chunk = ByteArray(8192)
-                    var total = 0
-                    while (true) {
-                        val read = input.read(chunk)
-                        if (read <= 0) break
-                        total += read
-                        if (total > 2 * 1024 * 1024) return null
-                        buffer.write(chunk, 0, read)
-                    }
-                    buffer.toByteArray()
+    private suspend fun queryItunesSongsWithRetry(query: String): List<JSONObject> {
+        if (query.isBlank()) return emptyList()
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val endpoint = "https://itunes.apple.com/search?term=$encoded&media=music&entity=song&limit=5"
+
+        repeat(2) { attempt ->
+            var shouldRetry = false
+            val parsed = try {
+                val conn = (URL(endpoint).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = CONNECT_TIMEOUT_MS
+                    readTimeout = READ_TIMEOUT_MS
+                    setRequestProperty("User-Agent", "AutoPulseHeadUnit/1.0")
                 }
-            } finally {
-                conn.disconnect()
+                try {
+                    val code = conn.responseCode
+                    if (code == 429 || code == HttpURLConnection.HTTP_UNAVAILABLE) {
+                        shouldRetry = true
+                        emptyList()
+                    } else if (code != HttpURLConnection.HTTP_OK) {
+                        emptyList()
+                    } else {
+                        val jsonText = conn.inputStream.bufferedReader().use { it.readText() }
+                        val root = JSONObject(jsonText)
+                        val results = root.optJSONArray("results") ?: return emptyList()
+                        buildList {
+                            for (i in 0 until results.length()) {
+                                results.optJSONObject(i)?.let { add(it) }
+                            }
+                        }
+                    }
+                } finally {
+                    conn.disconnect()
+                }
+            } catch (_: SocketTimeoutException) {
+                shouldRetry = true
+                emptyList()
+            } catch (_: IOException) {
+                shouldRetry = true
+                emptyList()
+            } catch (_: Exception) {
+                emptyList()
             }
-        }.getOrNull()
+
+            if (!shouldRetry || attempt == 1) {
+                return parsed
+            }
+            delay(RETRY_BACKOFF_MS)
+        }
+        return emptyList()
     }
+
+    private suspend fun downloadBytesWithRetry(urlString: String): ByteArray? {
+        repeat(2) { attempt ->
+            var shouldRetry = false
+            val bytes = try {
+                val conn = (URL(urlString).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = CONNECT_TIMEOUT_MS
+                    readTimeout = READ_TIMEOUT_MS
+                    setRequestProperty("User-Agent", "AutoPulseHeadUnit/1.0")
+                }
+                try {
+                    val code = conn.responseCode
+                    if (code == 429 || code == HttpURLConnection.HTTP_UNAVAILABLE) {
+                        shouldRetry = true
+                        null
+                    } else if (code != HttpURLConnection.HTTP_OK) {
+                        null
+                    } else {
+                        conn.inputStream.use { input ->
+                            val buffer = ByteArrayOutputStream()
+                            val chunk = ByteArray(8192)
+                            var total = 0
+                            while (true) {
+                                val read = input.read(chunk)
+                                if (read <= 0) break
+                                total += read
+                                if (total > 2 * 1024 * 1024) return null
+                                buffer.write(chunk, 0, read)
+                            }
+                            buffer.toByteArray()
+                        }
+                    }
+                } finally {
+                    conn.disconnect()
+                }
+            } catch (_: SocketTimeoutException) {
+                shouldRetry = true
+                null
+            } catch (_: IOException) {
+                shouldRetry = true
+                null
+            } catch (_: Exception) {
+                null
+            }
+
+            if (!shouldRetry || attempt == 1) {
+                return bytes
+            }
+            delay(RETRY_BACKOFF_MS)
+        }
+        return null
+    }
+
+    const val REQUEST_THROTTLE_MS = 400L
+    private const val RETRY_BACKOFF_MS = 2_000L
 }

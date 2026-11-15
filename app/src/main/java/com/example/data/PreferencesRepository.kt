@@ -21,6 +21,24 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 const val MAX_DOCK_APPS = 10
 const val DEFAULT_NIGHT_START_MINUTES = 19 * 60 + 30 // 19h30
 const val DEFAULT_NIGHT_END_MINUTES = 7 * 60 + 30    // 07h30
+const val SPEED_LIMIT_AUTO = -1
+const val SPEED_LIMIT_OFF = 0
+const val SPEED_ALERT_TOLERANCE_KMH = 3
+const val DEFAULT_AUTO_DETECTION_SECONDS = 8
+const val DEFAULT_SPEED_CALIBRATION_KMH = 0
+const val BREAK_REMINDER_INTERVAL_SECONDS = 7_200L
+
+enum class SpeedAlertType(val id: String, val label: String) {
+    VISUAL("VISUAL", "Visuel seul"),
+    BEEP("BEEP", "Visuel + Bip court"),
+    DUCKING("DUCKING", "Baisse musique (-30%)");
+
+    companion object {
+        fun fromId(id: String?): SpeedAlertType {
+            return entries.firstOrNull { it.id == id } ?: BEEP
+        }
+    }
+}
 
 data class TripStats(
     val distanceMeters: Double = 0.0,
@@ -53,8 +71,13 @@ data class HeadUnitSettings(
     val autoLaunchPackageName: String = "",
     val dockPackageNames: List<String> = emptyList(),
     val sdvcEnabled: Boolean = false,
-    val speedLimitKmh: Int = 0, // 0 = Off, sinon 50, 80, 90, 110, 130
+    val speedLimitKmh: Int = SPEED_LIMIT_AUTO, // -1 = Auto, 0 = Off, sinon 30, 50, 70, 80, 90, 110, 130
     val floatingPillEnabled: Boolean = false,
+    val autoSpeedDetectionSeconds: Int = DEFAULT_AUTO_DETECTION_SECONDS, // 5, 8 ou 12s
+    val speedAlertToleranceKmh: Int = SPEED_ALERT_TOLERANCE_KMH, // +0, +3, +5 ou +10 km/h
+    val speedAlertType: String = SpeedAlertType.BEEP.id, // VISUAL, BEEP, DUCKING
+    val speedCalibrationOffsetKmh: Int = DEFAULT_SPEED_CALIBRATION_KMH, // +0 à +5 km/h
+    val breakReminderEnabled: Boolean = false, // Pause conduite 2h
 )
 
 class PreferencesRepository(private val context: Context) {
@@ -76,6 +99,11 @@ class PreferencesRepository(private val context: Context) {
         val SDVC_ENABLED = booleanPreferencesKey("sdvc_enabled")
         val SPEED_LIMIT_KMH = intPreferencesKey("speed_limit_kmh")
         val FLOATING_PILL_ENABLED = booleanPreferencesKey("floating_pill_enabled")
+        val AUTO_SPEED_DETECTION_SEC = intPreferencesKey("auto_speed_detection_sec")
+        val SPEED_ALERT_TOLERANCE_KMH = intPreferencesKey("speed_alert_tolerance_kmh")
+        val SPEED_ALERT_TYPE = stringPreferencesKey("speed_alert_type")
+        val SPEED_CALIBRATION_OFFSET_KMH = intPreferencesKey("speed_calibration_offset_kmh")
+        val BREAK_REMINDER_ENABLED = booleanPreferencesKey("break_reminder_enabled")
         val TRIP_DISTANCE_METERS = doublePreferencesKey("trip_distance_meters")
         val TRIP_DRIVING_SECONDS = longPreferencesKey("trip_driving_seconds")
         val TRIP_MAX_SPEED_KMH = intPreferencesKey("trip_max_speed_kmh")
@@ -107,8 +135,13 @@ class PreferencesRepository(private val context: Context) {
             autoLaunchPackageName = prefs[Keys.AUTO_LAUNCH_PACKAGE] ?: "",
             dockPackageNames = dockList,
             sdvcEnabled = prefs[Keys.SDVC_ENABLED] ?: false,
-            speedLimitKmh = prefs[Keys.SPEED_LIMIT_KMH] ?: 0,
+            speedLimitKmh = (prefs[Keys.SPEED_LIMIT_KMH] ?: SPEED_LIMIT_AUTO).coerceAtLeast(SPEED_LIMIT_AUTO),
             floatingPillEnabled = prefs[Keys.FLOATING_PILL_ENABLED] ?: false,
+            autoSpeedDetectionSeconds = normalizeAutoDetectionSeconds(prefs[Keys.AUTO_SPEED_DETECTION_SEC]),
+            speedAlertToleranceKmh = normalizeAlertToleranceKmh(prefs[Keys.SPEED_ALERT_TOLERANCE_KMH]),
+            speedAlertType = SpeedAlertType.fromId(prefs[Keys.SPEED_ALERT_TYPE]).id,
+            speedCalibrationOffsetKmh = (prefs[Keys.SPEED_CALIBRATION_OFFSET_KMH] ?: DEFAULT_SPEED_CALIBRATION_KMH).coerceIn(0, 5),
+            breakReminderEnabled = prefs[Keys.BREAK_REMINDER_ENABLED] ?: false,
         )
     }
 
@@ -216,11 +249,31 @@ class PreferencesRepository(private val context: Context) {
     }
 
     suspend fun setSpeedLimitKmh(limitKmh: Int) {
-        context.dataStore.edit { it[Keys.SPEED_LIMIT_KMH] = limitKmh.coerceAtLeast(0) }
+        context.dataStore.edit { it[Keys.SPEED_LIMIT_KMH] = limitKmh.coerceAtLeast(SPEED_LIMIT_AUTO) }
     }
 
     suspend fun setFloatingPillEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.FLOATING_PILL_ENABLED] = enabled }
+    }
+
+    suspend fun setAutoSpeedDetectionSeconds(seconds: Int) {
+        context.dataStore.edit { it[Keys.AUTO_SPEED_DETECTION_SEC] = normalizeAutoDetectionSeconds(seconds) }
+    }
+
+    suspend fun setSpeedAlertToleranceKmh(toleranceKmh: Int) {
+        context.dataStore.edit { it[Keys.SPEED_ALERT_TOLERANCE_KMH] = normalizeAlertToleranceKmh(toleranceKmh) }
+    }
+
+    suspend fun setSpeedAlertType(typeId: String) {
+        context.dataStore.edit { it[Keys.SPEED_ALERT_TYPE] = SpeedAlertType.fromId(typeId).id }
+    }
+
+    suspend fun setSpeedCalibrationOffsetKmh(offsetKmh: Int) {
+        context.dataStore.edit { it[Keys.SPEED_CALIBRATION_OFFSET_KMH] = offsetKmh.coerceIn(0, 5) }
+    }
+
+    suspend fun setBreakReminderEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.BREAK_REMINDER_ENABLED] = enabled }
     }
 
     suspend fun importSettingsJson(jsonString: String): Boolean {
@@ -261,8 +314,22 @@ class PreferencesRepository(private val context: Context) {
                 prefs[Keys.AUTO_LAUNCH_PACKAGE] = obj.optString("autoLaunchPackageName", "")
                 prefs[Keys.DOCK_PACKAGES] = dockList.joinToString("|")
                 prefs[Keys.SDVC_ENABLED] = obj.optBoolean("sdvcEnabled", false)
-                prefs[Keys.SPEED_LIMIT_KMH] = obj.optInt("speedLimitKmh", 0).coerceAtLeast(0)
+                prefs[Keys.SPEED_LIMIT_KMH] = obj.optInt("speedLimitKmh", SPEED_LIMIT_AUTO).coerceAtLeast(SPEED_LIMIT_AUTO)
                 prefs[Keys.FLOATING_PILL_ENABLED] = obj.optBoolean("floatingPillEnabled", false)
+                prefs[Keys.AUTO_SPEED_DETECTION_SEC] = normalizeAutoDetectionSeconds(
+                    if (obj.has("autoSpeedDetectionSeconds")) obj.optInt("autoSpeedDetectionSeconds") else null
+                )
+                prefs[Keys.SPEED_ALERT_TOLERANCE_KMH] = normalizeAlertToleranceKmh(
+                    if (obj.has("speedAlertToleranceKmh")) obj.optInt("speedAlertToleranceKmh") else null
+                )
+                prefs[Keys.SPEED_ALERT_TYPE] = SpeedAlertType.fromId(
+                    obj.optString("speedAlertType", SpeedAlertType.BEEP.id)
+                ).id
+                prefs[Keys.SPEED_CALIBRATION_OFFSET_KMH] = obj.optInt(
+                    "speedCalibrationOffsetKmh",
+                    DEFAULT_SPEED_CALIBRATION_KMH,
+                ).coerceIn(0, 5)
+                prefs[Keys.BREAK_REMINDER_ENABLED] = obj.optBoolean("breakReminderEnabled", false)
             }
             true
         }.getOrDefault(false)
@@ -287,6 +354,11 @@ class PreferencesRepository(private val context: Context) {
                 put("sdvcEnabled", settings.sdvcEnabled)
                 put("speedLimitKmh", settings.speedLimitKmh)
                 put("floatingPillEnabled", settings.floatingPillEnabled)
+                put("autoSpeedDetectionSeconds", settings.autoSpeedDetectionSeconds)
+                put("speedAlertToleranceKmh", settings.speedAlertToleranceKmh)
+                put("speedAlertType", settings.speedAlertType)
+                put("speedCalibrationOffsetKmh", settings.speedCalibrationOffsetKmh)
+                put("breakReminderEnabled", settings.breakReminderEnabled)
             }.toString(2)
         }
 
@@ -336,6 +408,28 @@ class PreferencesRepository(private val context: Context) {
             val m = (safe % 3600L) / 60L
             val s = safe % 60L
             return "%02d:%02d:%02d".format(h, m, s)
+        }
+
+        fun normalizeAutoDetectionSeconds(value: Int?): Int {
+            return when (value) {
+                5, 8, 12 -> value
+                else -> DEFAULT_AUTO_DETECTION_SECONDS
+            }
+        }
+
+        fun normalizeAlertToleranceKmh(value: Int?): Int {
+            return when (value) {
+                0, 3, 5, 10 -> value
+                else -> SPEED_ALERT_TOLERANCE_KMH
+            }
+        }
+
+        fun isSpeedOverLimit(
+            speedKmh: Int,
+            activeLimitKmh: Int,
+            toleranceKmh: Int = SPEED_ALERT_TOLERANCE_KMH,
+        ): Boolean {
+            return activeLimitKmh > 0 && speedKmh >= activeLimitKmh + toleranceKmh.coerceAtLeast(0)
         }
     }
 }

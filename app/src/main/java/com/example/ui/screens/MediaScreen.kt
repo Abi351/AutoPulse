@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.util.LruCache
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -8,13 +9,16 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,7 +36,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,6 +47,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.BatteryFull
@@ -50,12 +57,14 @@ import androidx.compose.material.icons.rounded.CalendarToday
 import androidx.compose.material.icons.rounded.Category
 import androidx.compose.material.icons.rounded.Clear
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.CloseFullscreen
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Equalizer
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.OpenInFull
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -86,12 +95,15 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -99,7 +111,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -121,6 +135,7 @@ import com.example.ui.theme.CarbonSurface
 import com.example.ui.theme.CarbonSurfaceElevated
 import com.example.ui.theme.EmeraldOk
 import com.example.ui.theme.JetBrainsMonoFamily
+import com.example.ui.theme.ObsidianBg
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
@@ -136,9 +151,22 @@ private enum class LibraryCategory(val label: String) {
 }
 
 private data class CategoryGroupEntry(
-    val name: String,
+    val keyLower: String,
+    val displayName: String,
     val count: Int,
 )
+
+private fun categoryKeyForTrack(track: AudioTrackEntity, category: LibraryCategory): String {
+    return when (category) {
+        LibraryCategory.ARTISTS -> track.artist.trim().ifBlank { "Artiste inconnu" }
+        LibraryCategory.ALBUMS -> track.album.trim().ifBlank {
+            track.folderName.trim().ifBlank { "Album inconnu" }
+        }
+        LibraryCategory.GENRES -> track.genre.trim().ifBlank { "Inconnu" }
+        LibraryCategory.YEARS -> track.year.trim().ifBlank { "Année inconnue" }
+        LibraryCategory.ALL -> ""
+    }
+}
 
 @Composable
 fun MediaScreen(
@@ -162,11 +190,46 @@ fun MediaScreen(
     onRefreshBluetooth: () -> Unit,
     onRequestBtPermission: () -> Unit,
     onOpenNotificationListenerSettings: () -> Unit,
+    closeOverlaysSignal: Int = 0,
     modifier: Modifier = Modifier,
 ) {
     var isSidePanelOpen by remember { mutableStateOf(false) }
+    var isLibraryExpanded by remember { mutableStateOf(false) }
     var showEqDialog by remember { mutableStateOf(false) }
-    val thumbCache = remember { LruCache<String, ImageBitmap>(24) }
+    var showImportDialog by remember { mutableStateOf(false) }
+
+    var searchQuery by remember { mutableStateOf("") }
+    var activeCategory by remember { mutableStateOf(LibraryCategory.ALL) }
+    var selectedGroupKey by remember { mutableStateOf<String?>(null) }
+    var selectedGroupLabel by remember { mutableStateOf<String?>(null) }
+
+    val thumbCache = remember { LruCache<String, ImageBitmap>(32) }
+    val sideListState = rememberLazyListState()
+    val expandedListState = rememberLazyListState()
+
+    LaunchedEffect(closeOverlaysSignal) {
+        if (closeOverlaysSignal > 0) {
+            isSidePanelOpen = false
+            isLibraryExpanded = false
+            showEqDialog = false
+            showImportDialog = false
+        }
+    }
+
+    LaunchedEffect(mediaState.sourceMode) {
+        if (mediaState.sourceMode != AudioSourceMode.LOCAL) {
+            isLibraryExpanded = false
+        }
+    }
+
+    BackHandler(enabled = isLibraryExpanded) {
+        if (selectedGroupKey != null) {
+            selectedGroupKey = null
+            selectedGroupLabel = null
+        } else {
+            isLibraryExpanded = false
+        }
+    }
 
     val filesPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
@@ -211,7 +274,7 @@ fun MediaScreen(
             )
 
             AnimatedVisibility(
-                visible = isSidePanelOpen,
+                visible = isSidePanelOpen && !isLibraryExpanded,
                 enter = expandHorizontally(
                     animationSpec = tween(200),
                     expandFrom = Alignment.End,
@@ -228,17 +291,68 @@ fun MediaScreen(
                     mediaState = mediaState,
                     tracks = tracks,
                     thumbCache = thumbCache,
+                    listState = sideListState,
+                    searchQuery = searchQuery,
+                    onSearchQueryChange = { searchQuery = it },
+                    activeCategory = activeCategory,
+                    onSelectCategory = { cat ->
+                        activeCategory = cat
+                        selectedGroupKey = null
+                        selectedGroupLabel = null
+                    },
+                    selectedGroupKey = selectedGroupKey,
+                    selectedGroupLabel = selectedGroupLabel,
+                    onSelectGroup = { key, label ->
+                        selectedGroupKey = key
+                        selectedGroupLabel = label
+                    },
                     onPlayTrack = onPlayTrack,
                     onDeleteTrack = onDeleteTrack,
-                    onPickFiles = { filesPicker.launch(arrayOf("audio/*")) },
-                    onPickFolder = { folderPicker.launch(null) },
+                    onOpenImportDialog = { showImportDialog = true },
                     onRefreshBluetooth = onRefreshBluetooth,
                     onRequestBtPermission = onRequestBtPermission,
                     onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
+                    onExpandLibrary = { isLibraryExpanded = true },
                     onClosePanel = { isSidePanelOpen = false },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+        }
+
+        AnimatedVisibility(
+            visible = isLibraryExpanded && mediaState.sourceMode == AudioSourceMode.LOCAL,
+            enter = fadeIn(animationSpec = tween(160)),
+            exit = fadeOut(animationSpec = tween(140)),
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            ExpandedLibraryOverlay(
+                mediaState = mediaState,
+                tracks = tracks,
+                thumbCache = thumbCache,
+                listState = expandedListState,
+                searchQuery = searchQuery,
+                onSearchQueryChange = { searchQuery = it },
+                activeCategory = activeCategory,
+                onSelectCategory = { cat ->
+                    activeCategory = cat
+                    selectedGroupKey = null
+                    selectedGroupLabel = null
+                },
+                selectedGroupKey = selectedGroupKey,
+                selectedGroupLabel = selectedGroupLabel,
+                onSelectGroup = { key, label ->
+                    selectedGroupKey = key
+                    selectedGroupLabel = label
+                },
+                onPlayTrack = onPlayTrack,
+                onDeleteTrack = onDeleteTrack,
+                onOpenImportDialog = { showImportDialog = true },
+                onCollapse = { isLibraryExpanded = false },
+                onCloseAll = {
+                    isLibraryExpanded = false
+                    isSidePanelOpen = false
+                },
+            )
         }
     }
 
@@ -249,6 +363,20 @@ fun MediaScreen(
             onSetEqEnabled = onSetEqEnabled,
             onApplyPreset = onApplyEqPreset,
             onSetBand = onSetEqBand,
+        )
+    }
+
+    if (showImportDialog) {
+        ImportAudioDialog(
+            onDismiss = { showImportDialog = false },
+            onPickFolder = {
+                showImportDialog = false
+                folderPicker.launch(null)
+            },
+            onPickFiles = {
+                showImportDialog = false
+                filesPicker.launch(arrayOf("audio/*"))
+            },
         )
     }
 }
@@ -324,6 +452,16 @@ private fun PlayerDeckPane(
     }
 
     val activeArt = if (isExternal) ext.albumArt else mediaState.currentAlbumArt
+    val activeArtBitmap = remember(
+        mediaState.currentTrack?.id,
+        mediaState.currentTrack?.coverPath,
+        activeArt,
+        isExternal,
+        ext.title,
+    ) {
+        activeArt?.asImageBitmap()
+    }
+    val artTrackKey = if (isExternal) "ext_${ext.title}" else "loc_${mediaState.currentTrack?.id ?: -1}"
     val panelToggleIcon = if (isExternal) Icons.Rounded.Bluetooth else Icons.AutoMirrored.Rounded.QueueMusic
     val panelToggleDesc = if (isExternal) {
         "Afficher les appareils Bluetooth appairés"
@@ -397,9 +535,12 @@ private fun PlayerDeckPane(
                         contentAlignment = Alignment.Center,
                     ) {
                         AlbumArtworkBox(
-                            bitmap = activeArt,
+                            imageBitmap = activeArtBitmap,
+                            trackKey = artTrackKey,
                             size = largeArtSize,
                             cornerRadius = 24.dp,
+                            onSwipePrevious = onPrevTrack,
+                            onSwipeNext = onNextTrack,
                         )
                     }
 
@@ -524,9 +665,12 @@ private fun PlayerDeckPane(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     AlbumArtworkBox(
-                        bitmap = activeArt,
+                        imageBitmap = activeArtBitmap,
+                        trackKey = artTrackKey,
                         size = compactArtSize,
                         cornerRadius = 16.dp,
+                        onSwipePrevious = onPrevTrack,
+                        onSwipeNext = onNextTrack,
                     )
                     Column(modifier = Modifier.weight(1f)) {
                         Row(
@@ -624,30 +768,67 @@ private fun PanelToggleIconButton(
 
 @Composable
 private fun AlbumArtworkBox(
-    bitmap: android.graphics.Bitmap?,
+    imageBitmap: ImageBitmap?,
+    trackKey: String,
     size: Dp,
     cornerRadius: Dp,
+    onSwipePrevious: () -> Unit,
+    onSwipeNext: () -> Unit,
 ) {
-    if (bitmap != null) {
-        Image(
-            bitmap = bitmap.asImageBitmap(),
-            contentDescription = "Pochette album",
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .size(size)
-                .clip(RoundedCornerShape(cornerRadius))
-                .border(1.dp, CarbonBorder, RoundedCornerShape(cornerRadius)),
-        )
-    } else {
-        Image(
-            painter = painterResource(id = R.drawable.img_album_red),
-            contentDescription = "Vinyle rouge par défaut",
-            contentScale = ContentScale.Crop,
-            modifier = Modifier
-                .size(size)
-                .clip(RoundedCornerShape(cornerRadius))
-                .border(1.dp, CarbonBorder, RoundedCornerShape(cornerRadius)),
-        )
+    val swipeThresholdPx = with(LocalDensity.current) { 60.dp.toPx() }
+    var dragOffsetX by remember(trackKey) { mutableFloatStateOf(0f) }
+    val animatedOffset by animateFloatAsState(
+        targetValue = dragOffsetX * 0.45f,
+        animationSpec = spring(stiffness = 450f),
+        label = "media_album_art_drag",
+    )
+
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(RoundedCornerShape(cornerRadius))
+            .border(1.dp, CarbonBorder, RoundedCornerShape(cornerRadius))
+            .pointerInput(trackKey) {
+                detectHorizontalDragGestures(
+                    onDragStart = { dragOffsetX = 0f },
+                    onDragCancel = { dragOffsetX = 0f },
+                    onDragEnd = {
+                        if (dragOffsetX > swipeThresholdPx) {
+                            onSwipePrevious()
+                        } else if (dragOffsetX < -swipeThresholdPx) {
+                            onSwipeNext()
+                        }
+                        dragOffsetX = 0f
+                    },
+                    onHorizontalDrag = { change, dragAmount ->
+                        change.consume()
+                        dragOffsetX = (dragOffsetX + dragAmount).coerceIn(-swipeThresholdPx * 1.6f, swipeThresholdPx * 1.6f)
+                    },
+                )
+            }
+            .testTag("media_album_art"),
+        contentAlignment = Alignment.Center,
+    ) {
+        val imageModifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer { translationX = animatedOffset }
+            .clip(RoundedCornerShape(cornerRadius))
+
+        if (imageBitmap != null) {
+            Image(
+                bitmap = imageBitmap,
+                contentDescription = "Pochette album (glisser pour changer de piste)",
+                contentScale = ContentScale.Crop,
+                modifier = imageModifier,
+            )
+        } else {
+            Image(
+                painter = painterResource(id = R.drawable.img_album_red),
+                contentDescription = "Vinyle rouge par défaut (glisser pour changer de piste)",
+                contentScale = ContentScale.Crop,
+                modifier = imageModifier,
+            )
+        }
     }
 }
 
@@ -921,23 +1102,27 @@ private fun SourceLibraryPane(
     mediaState: MediaPlayerState,
     tracks: List<AudioTrackEntity>,
     thumbCache: LruCache<String, ImageBitmap>,
+    listState: LazyListState,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    activeCategory: LibraryCategory,
+    onSelectCategory: (LibraryCategory) -> Unit,
+    selectedGroupKey: String?,
+    selectedGroupLabel: String?,
+    onSelectGroup: (keyLower: String?, label: String?) -> Unit,
     onPlayTrack: (AudioTrackEntity) -> Unit,
     onDeleteTrack: (Int) -> Unit,
-    onPickFiles: () -> Unit,
-    onPickFolder: () -> Unit,
+    onOpenImportDialog: () -> Unit,
     onRefreshBluetooth: () -> Unit,
     onRequestBtPermission: () -> Unit,
     onOpenNotificationListenerSettings: () -> Unit,
+    onExpandLibrary: () -> Unit,
     onClosePanel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val primary = MaterialTheme.colorScheme.primary
     val accent = MaterialTheme.colorScheme.secondary
     val container = MaterialTheme.colorScheme.primaryContainer
-
-    var searchQuery by remember { mutableStateOf("") }
-    var activeCategory by remember { mutableStateOf(LibraryCategory.ALL) }
-    var selectedGroupValue by remember { mutableStateOf<String?>(null) }
 
     Column(
         modifier = modifier
@@ -946,15 +1131,15 @@ private fun SourceLibraryPane(
             .border(1.dp, CarbonBorder, RoundedCornerShape(24.dp))
             .padding(14.dp),
     ) {
-        // En-tête du panneau coulissant avec bouton Fermer (X)
+        // En-tête du panneau coulissant avec Importer (+), Agrandir et Fermer (X)
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = if (mediaState.sourceMode == AudioSourceMode.LOCAL) {
-                    "Bibliothèque hors ligne (${tracks.size})"
+                    "Bibliothèque (${tracks.size})"
                 } else {
                     "Appareils Bluetooth & Média"
                 },
@@ -964,6 +1149,42 @@ private fun SourceLibraryPane(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            if (mediaState.sourceMode == AudioSourceMode.LOCAL) {
+                IconButton(
+                    onClick = onOpenImportDialog,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(container.copy(alpha = 0.72f))
+                        .border(1.dp, primary.copy(alpha = 0.65f), CircleShape)
+                        .testTag("media_import_plus_btn"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = "Importer",
+                        tint = accent,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                IconButton(
+                    onClick = onExpandLibrary,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .size(40.dp)
+                        .clip(CircleShape)
+                        .background(CarbonSurfaceElevated)
+                        .border(1.dp, CarbonBorder, CircleShape)
+                        .testTag("media_expand_library_btn"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.OpenInFull,
+                        contentDescription = "Agrandir la bibliothèque",
+                        tint = accent,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
             IconButton(
                 onClick = onClosePanel,
                 modifier = Modifier
@@ -980,358 +1201,23 @@ private fun SourceLibraryPane(
         Spacer(Modifier.height(8.dp))
 
         if (mediaState.sourceMode == AudioSourceMode.LOCAL) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Button(
-                    onClick = onPickFolder,
-                    colors = ButtonDefaults.buttonColors(containerColor = container, contentColor = accent),
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(44.dp)
-                        .testTag("media_import_folder_btn"),
-                ) {
-                    Icon(Icons.Rounded.CreateNewFolder, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Dossier USB/SD", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                OutlinedButton(
-                    onClick = onPickFiles,
-                    shape = RoundedCornerShape(12.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(44.dp)
-                        .testTag("media_import_files_btn"),
-                ) {
-                    Icon(Icons.Rounded.AudioFile, contentDescription = null, tint = accent, modifier = Modifier.size(16.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Fichiers", color = accent, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-
-            // Barre de recherche instantanée
-            OutlinedTextField(
-                value = searchQuery,
-                onValueChange = { searchQuery = it },
-                singleLine = true,
-                placeholder = {
-                    Text(
-                        text = "Rechercher titre, artiste, album...",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                },
-                leadingIcon = {
-                    Icon(Icons.Rounded.Search, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
-                },
-                trailingIcon = {
-                    if (searchQuery.isNotEmpty()) {
-                        IconButton(onClick = { searchQuery = "" }) {
-                            Icon(Icons.Rounded.Clear, contentDescription = "Effacer", tint = TextSecondary, modifier = Modifier.size(18.dp))
-                        }
-                    }
-                },
-                shape = RoundedCornerShape(12.dp),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = primary,
-                    unfocusedBorderColor = CarbonBorder,
-                    focusedContainerColor = CarbonSurfaceElevated,
-                    unfocusedContainerColor = CarbonSurfaceElevated,
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary,
-                ),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("media_search_input"),
+            LocalLibraryContent(
+                mediaState = mediaState,
+                tracks = tracks,
+                thumbCache = thumbCache,
+                listState = listState,
+                isExpandedLayout = false,
+                searchQuery = searchQuery,
+                onSearchQueryChange = onSearchQueryChange,
+                activeCategory = activeCategory,
+                onSelectCategory = onSelectCategory,
+                selectedGroupKey = selectedGroupKey,
+                selectedGroupLabel = selectedGroupLabel,
+                onSelectGroup = onSelectGroup,
+                onPlayTrack = onPlayTrack,
+                onDeleteTrack = onDeleteTrack,
+                modifier = Modifier.weight(1f),
             )
-
-            Spacer(Modifier.height(8.dp))
-
-            // Puces de catégories défilables
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                LibraryCategory.entries.forEach { category ->
-                    val selected = activeCategory == category
-                    FilterChip(
-                        selected = selected,
-                        onClick = {
-                            activeCategory = category
-                            selectedGroupValue = null
-                        },
-                        label = { Text(category.label, maxLines = 1) },
-                        modifier = Modifier.testTag("media_cat_${category.name.lowercase()}"),
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-
-            if (mediaState.isScanningFolder) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.padding(vertical = 6.dp),
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), color = primary)
-                    Text("Indexation des fichiers audio...", style = MaterialTheme.typography.bodyMedium, color = accent)
-                }
-            }
-
-            if (tracks.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(16.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(Icons.Rounded.MusicNote, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(44.dp))
-                        Text("Bibliothèque hors ligne vide", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
-                        Text(
-                            text = "Sélectionnez un dossier de votre clé USB, carte SD ou mémoire interne.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary,
-                        )
-                    }
-                }
-            } else {
-                val queryTrimmed = searchQuery.trim()
-                val queryFilteredTracks = remember(tracks, queryTrimmed) {
-                    if (queryTrimmed.isEmpty()) {
-                        tracks
-                    } else {
-                        tracks.filter { track ->
-                            track.title.contains(queryTrimmed, ignoreCase = true) ||
-                                track.artist.contains(queryTrimmed, ignoreCase = true) ||
-                                track.album.contains(queryTrimmed, ignoreCase = true)
-                        }
-                    }
-                }
-
-                val showGroupedList = activeCategory != LibraryCategory.ALL && selectedGroupValue == null
-
-                if (showGroupedList) {
-                    val groups = remember(queryFilteredTracks, activeCategory) {
-                        val grouped = when (activeCategory) {
-                            LibraryCategory.ARTISTS -> queryFilteredTracks.groupBy { it.artist.ifBlank { "Artiste inconnu" } }
-                            LibraryCategory.ALBUMS -> queryFilteredTracks.groupBy { it.album.ifBlank { it.folderName } }
-                            LibraryCategory.GENRES -> queryFilteredTracks.groupBy { it.genre.ifBlank { "Inconnu" } }
-                            LibraryCategory.YEARS -> queryFilteredTracks.groupBy { it.year.ifBlank { "Année inconnue" } }
-                            LibraryCategory.ALL -> emptyMap()
-                        }
-                        val entries = grouped.map { (name, items) -> CategoryGroupEntry(name, items.size) }
-                        if (activeCategory == LibraryCategory.YEARS) {
-                            entries.sortedByDescending { it.name }
-                        } else {
-                            entries.sortedBy { it.name.lowercase() }
-                        }
-                    }
-
-                    val groupIcon = when (activeCategory) {
-                        LibraryCategory.ARTISTS -> Icons.Rounded.Person
-                        LibraryCategory.ALBUMS -> Icons.Rounded.Album
-                        LibraryCategory.GENRES -> Icons.Rounded.Category
-                        LibraryCategory.YEARS -> Icons.Rounded.CalendarToday
-                        LibraryCategory.ALL -> Icons.Rounded.MusicNote
-                    }
-
-                    LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(groups, key = { it.name }) { entry ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .background(CarbonSurfaceElevated)
-                                    .border(1.dp, CarbonBorder, RoundedCornerShape(14.dp))
-                                    .clickable { selectedGroupValue = entry.name }
-                                    .padding(horizontal = 12.dp, vertical = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Icon(groupIcon, contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
-                                Spacer(Modifier.width(10.dp))
-                                Text(
-                                    text = entry.name,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = TextPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
-                                )
-                                Text(
-                                    text = "${entry.count} morceau${if (entry.count > 1) "x" else ""}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = TextSecondary,
-                                )
-                            }
-                        }
-                    }
-                } else {
-                    if (selectedGroupValue != null) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(bottom = 8.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(container.copy(alpha = 0.6f))
-                                .clickable { selectedGroupValue = null }
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Retour", tint = accent, modifier = Modifier.size(16.dp))
-                            Text(
-                                text = "${activeCategory.label} : $selectedGroupValue",
-                                style = MaterialTheme.typography.labelLarge,
-                                color = accent,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-
-                    val displayedTracks = remember(queryFilteredTracks, activeCategory, selectedGroupValue) {
-                        val grp = selectedGroupValue
-                        if (grp == null) {
-                            queryFilteredTracks
-                        } else {
-                            queryFilteredTracks.filter { track ->
-                                when (activeCategory) {
-                                    LibraryCategory.ARTISTS -> track.artist.ifBlank { "Artiste inconnu" } == grp
-                                    LibraryCategory.ALBUMS -> track.album.ifBlank { track.folderName } == grp
-                                    LibraryCategory.GENRES -> track.genre.ifBlank { "Inconnu" } == grp
-                                    LibraryCategory.YEARS -> track.year.ifBlank { "Année inconnue" } == grp
-                                    LibraryCategory.ALL -> true
-                                }
-                            }
-                        }
-                    }
-
-                    if (displayedTracks.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(16.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = "Aucun morceau ne correspond à votre recherche.",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = TextSecondary,
-                            )
-                        }
-                    } else {
-                        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(displayedTracks, key = { it.id }) { track ->
-                                val isCurrent = mediaState.currentTrack?.id == track.id
-                                val coverThumb by produceState<ImageBitmap?>(
-                                    initialValue = track.coverPath?.let { thumbCache.get(it) },
-                                    key1 = track.coverPath,
-                                ) {
-                                    val path = track.coverPath
-                                    if (path != null && value == null) {
-                                        val loaded = withContext(Dispatchers.IO) {
-                                            MetadataFetcher.loadCoverBitmapRgb565(path)?.asImageBitmap()
-                                        }
-                                        if (loaded != null) {
-                                            thumbCache.put(path, loaded)
-                                            value = loaded
-                                        }
-                                    }
-                                }
-
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(if (isCurrent) container.copy(alpha = 0.7f) else CarbonSurfaceElevated)
-                                        .border(
-                                            1.dp,
-                                            if (isCurrent) primary.copy(alpha = 0.7f) else Color.Transparent,
-                                            RoundedCornerShape(14.dp),
-                                        )
-                                        .clickable { onPlayTrack(track) }
-                                        .padding(horizontal = 10.dp, vertical = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    val bmp = coverThumb
-                                    if (bmp != null) {
-                                        Image(
-                                            bitmap = bmp,
-                                            contentDescription = track.title,
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier
-                                                .size(38.dp)
-                                                .clip(RoundedCornerShape(8.dp)),
-                                        )
-                                    } else {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(38.dp)
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(CarbonSurface),
-                                            contentAlignment = Alignment.Center,
-                                        ) {
-                                            Icon(
-                                                imageVector = Icons.Rounded.MusicNote,
-                                                contentDescription = null,
-                                                tint = if (isCurrent) primary else TextSecondary,
-                                                modifier = Modifier.size(20.dp),
-                                            )
-                                        }
-                                    }
-                                    Spacer(Modifier.width(10.dp))
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = track.title,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            color = if (isCurrent) accent else TextPrimary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        val metaLine = buildString {
-                                            append(track.artist)
-                                            if (track.year.isNotBlank()) {
-                                                append(" • ")
-                                                append(track.year)
-                                            }
-                                            if (track.genre.isNotBlank() && track.genre != "Inconnu") {
-                                                append(" • ")
-                                                append(track.genre)
-                                            }
-                                        }
-                                        Text(
-                                            text = metaLine,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = TextSecondary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                    Text(
-                                        text = AudioEngine.formatDuration(track.durationMs),
-                                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
-                                        color = TextSecondary,
-                                        modifier = Modifier.padding(horizontal = 4.dp),
-                                    )
-                                    IconButton(onClick = { onDeleteTrack(track.id) }) {
-                                        Icon(Icons.Rounded.Delete, contentDescription = "Retirer", tint = TextSecondary, modifier = Modifier.size(18.dp))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         } else {
             // Contrôle Média Universel (MediaSessionManager) + Bluetooth A2DP
             Surface(
@@ -1481,6 +1367,653 @@ private fun SourceLibraryPane(
 }
 
 @Composable
+private fun ExpandedLibraryOverlay(
+    mediaState: MediaPlayerState,
+    tracks: List<AudioTrackEntity>,
+    thumbCache: LruCache<String, ImageBitmap>,
+    listState: LazyListState,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    activeCategory: LibraryCategory,
+    onSelectCategory: (LibraryCategory) -> Unit,
+    selectedGroupKey: String?,
+    selectedGroupLabel: String?,
+    onSelectGroup: (keyLower: String?, label: String?) -> Unit,
+    onPlayTrack: (AudioTrackEntity) -> Unit,
+    onDeleteTrack: (Int) -> Unit,
+    onOpenImportDialog: () -> Unit,
+    onCollapse: () -> Unit,
+    onCloseAll: () -> Unit,
+) {
+    val primary = MaterialTheme.colorScheme.primary
+    val accent = MaterialTheme.colorScheme.secondary
+    val container = MaterialTheme.colorScheme.primaryContainer
+
+    Surface(
+        color = ObsidianBg,
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("media_expanded_library_overlay"),
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(16.dp)
+                .clip(RoundedCornerShape(24.dp))
+                .background(CarbonSurface)
+                .border(1.dp, CarbonBorder, RoundedCornerShape(24.dp))
+                .padding(18.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .width(24.dp)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(primary),
+                    )
+                    Text(
+                        text = if (selectedGroupLabel != null) {
+                            "${activeCategory.label} • $selectedGroupLabel"
+                        } else {
+                            "Bibliothèque hors ligne (${tracks.size})"
+                        },
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                if (selectedGroupKey != null) {
+                    OutlinedButton(
+                        onClick = { onSelectGroup(null, null) },
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .height(44.dp)
+                            .testTag("media_expanded_back_btn"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = "Retour aux catégories",
+                            tint = accent,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Retour", color = accent, maxLines = 1)
+                    }
+                }
+
+                IconButton(
+                    onClick = onOpenImportDialog,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(container.copy(alpha = 0.72f))
+                        .border(1.dp, primary.copy(alpha = 0.65f), CircleShape)
+                        .testTag("media_expanded_import_plus_btn"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = "Importer",
+                        tint = accent,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onCollapse,
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .height(44.dp)
+                        .testTag("media_collapse_library_btn"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.CloseFullscreen,
+                        contentDescription = "Réduire",
+                        tint = TextPrimary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("Réduire", color = TextPrimary, maxLines = 1)
+                }
+
+                IconButton(
+                    onClick = onCloseAll,
+                    modifier = Modifier
+                        .minimumInteractiveComponentSize()
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(container.copy(alpha = 0.65f))
+                        .border(1.dp, primary.copy(alpha = 0.5f), CircleShape)
+                        .testTag("media_close_expanded_library_btn"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Fermer la bibliothèque",
+                        tint = accent,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            LocalLibraryContent(
+                mediaState = mediaState,
+                tracks = tracks,
+                thumbCache = thumbCache,
+                listState = listState,
+                isExpandedLayout = true,
+                searchQuery = searchQuery,
+                onSearchQueryChange = onSearchQueryChange,
+                activeCategory = activeCategory,
+                onSelectCategory = onSelectCategory,
+                selectedGroupKey = selectedGroupKey,
+                selectedGroupLabel = selectedGroupLabel,
+                onSelectGroup = onSelectGroup,
+                onPlayTrack = onPlayTrack,
+                onDeleteTrack = onDeleteTrack,
+                modifier = Modifier.weight(1f),
+            )
+        }
+    }
+}
+
+@Composable
+private fun LocalLibraryContent(
+    mediaState: MediaPlayerState,
+    tracks: List<AudioTrackEntity>,
+    thumbCache: LruCache<String, ImageBitmap>,
+    listState: LazyListState,
+    isExpandedLayout: Boolean,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    activeCategory: LibraryCategory,
+    onSelectCategory: (LibraryCategory) -> Unit,
+    selectedGroupKey: String?,
+    selectedGroupLabel: String?,
+    onSelectGroup: (keyLower: String?, label: String?) -> Unit,
+    onPlayTrack: (AudioTrackEntity) -> Unit,
+    onDeleteTrack: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val primary = MaterialTheme.colorScheme.primary
+    val accent = MaterialTheme.colorScheme.secondary
+    val container = MaterialTheme.colorScheme.primaryContainer
+
+    var showCategoryChips by remember { mutableStateOf(true) }
+    var prevIndex by remember { mutableIntStateOf(0) }
+    var prevOffset by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(listState, activeCategory, selectedGroupKey) {
+        showCategoryChips = true
+        prevIndex = listState.firstVisibleItemIndex
+        prevOffset = listState.firstVisibleItemScrollOffset
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (idx, off) ->
+                if (idx == 0 && off <= 8) {
+                    showCategoryChips = true
+                } else if (idx > prevIndex || (idx == prevIndex && off > prevOffset + 12)) {
+                    showCategoryChips = false
+                } else if (idx < prevIndex || (idx == prevIndex && off < prevOffset - 12)) {
+                    showCategoryChips = true
+                }
+                prevIndex = idx
+                prevOffset = off
+            }
+    }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = onSearchQueryChange,
+            singleLine = true,
+            placeholder = {
+                Text(
+                    text = "Rechercher titre, artiste, album...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            },
+            leadingIcon = {
+                Icon(Icons.Rounded.Search, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
+            },
+            trailingIcon = {
+                if (searchQuery.isNotEmpty()) {
+                    IconButton(onClick = { onSearchQueryChange("") }) {
+                        Icon(Icons.Rounded.Clear, contentDescription = "Effacer", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                    }
+                }
+            },
+            shape = RoundedCornerShape(12.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = primary,
+                unfocusedBorderColor = CarbonBorder,
+                focusedContainerColor = CarbonSurfaceElevated,
+                unfocusedContainerColor = CarbonSurfaceElevated,
+                focusedTextColor = TextPrimary,
+                unfocusedTextColor = TextPrimary,
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(if (isExpandedLayout) "media_expanded_search_input" else "media_search_input"),
+        )
+
+        AnimatedVisibility(
+            visible = showCategoryChips,
+            enter = expandVertically(animationSpec = tween(180)) + fadeIn(animationSpec = tween(160)),
+            exit = shrinkVertically(animationSpec = tween(160)) + fadeOut(animationSpec = tween(130)),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                LibraryCategory.entries.forEach { category ->
+                    val selected = activeCategory == category
+                    FilterChip(
+                        selected = selected,
+                        onClick = { onSelectCategory(category) },
+                        label = { Text(category.label, maxLines = 1) },
+                        modifier = Modifier.testTag(
+                            if (isExpandedLayout) "media_expanded_cat_${category.name.lowercase()}"
+                            else "media_cat_${category.name.lowercase()}"
+                        ),
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        if (mediaState.isScanningFolder) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.padding(vertical = 6.dp),
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp), color = primary)
+                Text("Indexation des fichiers audio...", style = MaterialTheme.typography.bodyMedium, color = accent)
+            }
+        }
+
+        if (tracks.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Icon(Icons.Rounded.MusicNote, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(44.dp))
+                    Text("Bibliothèque hors ligne vide", style = MaterialTheme.typography.titleMedium, color = TextPrimary)
+                    Text(
+                        text = "Sélectionnez un dossier de votre clé USB, carte SD ou mémoire interne.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                    )
+                }
+            }
+        } else {
+            val queryTrimmed = searchQuery.trim()
+            val queryFilteredTracks = remember(tracks, queryTrimmed) {
+                if (queryTrimmed.isEmpty()) {
+                    tracks
+                } else {
+                    tracks.filter { track ->
+                        track.title.contains(queryTrimmed, ignoreCase = true) ||
+                            track.artist.contains(queryTrimmed, ignoreCase = true) ||
+                            track.album.contains(queryTrimmed, ignoreCase = true) ||
+                            track.genre.contains(queryTrimmed, ignoreCase = true) ||
+                            track.year.contains(queryTrimmed, ignoreCase = true)
+                    }
+                }
+            }
+
+            val showGroupedList = activeCategory != LibraryCategory.ALL && selectedGroupKey == null
+
+            if (showGroupedList) {
+                val groups = remember(queryFilteredTracks, activeCategory) {
+                    val grouped = queryFilteredTracks.groupBy {
+                        categoryKeyForTrack(it, activeCategory).lowercase()
+                    }
+                    val entries = grouped.map { (keyLower, items) ->
+                        val display = categoryKeyForTrack(items.first(), activeCategory)
+                        CategoryGroupEntry(
+                            keyLower = keyLower,
+                            displayName = display,
+                            count = items.size,
+                        )
+                    }
+                    if (activeCategory == LibraryCategory.YEARS) {
+                        entries.sortedByDescending { it.displayName }
+                    } else {
+                        entries.sortedBy { it.keyLower }
+                    }
+                }
+
+                val groupIcon = when (activeCategory) {
+                    LibraryCategory.ARTISTS -> Icons.Rounded.Person
+                    LibraryCategory.ALBUMS -> Icons.Rounded.Album
+                    LibraryCategory.GENRES -> Icons.Rounded.Category
+                    LibraryCategory.YEARS -> Icons.Rounded.CalendarToday
+                    LibraryCategory.ALL -> Icons.Rounded.MusicNote
+                }
+
+                if (groups.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "Aucune catégorie trouvée pour votre recherche.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondary,
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        items(groups, key = { "${activeCategory.name}_${it.keyLower}" }) { entry ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(CarbonSurfaceElevated)
+                                    .border(1.dp, CarbonBorder, RoundedCornerShape(14.dp))
+                                    .clickable { onSelectGroup(entry.keyLower, entry.displayName) }
+                                    .padding(horizontal = 14.dp, vertical = 14.dp)
+                                    .testTag("media_group_row_${entry.displayName}"),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Icon(groupIcon, contentDescription = null, tint = accent, modifier = Modifier.size(22.dp))
+                                Spacer(Modifier.width(12.dp))
+                                Text(
+                                    text = entry.displayName,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = TextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    text = "${entry.count} morceau${if (entry.count > 1) "x" else ""}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = TextSecondary,
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (selectedGroupKey != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(container.copy(alpha = 0.78f))
+                                .border(1.dp, primary.copy(alpha = 0.7f), RoundedCornerShape(12.dp))
+                                .clickable { onSelectGroup(null, null) }
+                                .padding(horizontal = 12.dp, vertical = 9.dp)
+                                .testTag("media_back_to_categories_btn"),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                                contentDescription = "Retour aux catégories",
+                                tint = accent,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                text = "← Retour aux catégories",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = accent,
+                                maxLines = 1,
+                            )
+                        }
+
+                        Text(
+                            text = "${activeCategory.label} : ${selectedGroupLabel.orEmpty()}",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = TextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+
+                val displayedTracks = remember(queryFilteredTracks, activeCategory, selectedGroupKey) {
+                    val grpKey = selectedGroupKey
+                    if (grpKey == null || activeCategory == LibraryCategory.ALL) {
+                        queryFilteredTracks
+                    } else {
+                        queryFilteredTracks.filter { track ->
+                            categoryKeyForTrack(track, activeCategory).equals(grpKey, ignoreCase = true)
+                        }
+                    }
+                }
+
+                LaunchedEffect(mediaState.currentTrack?.id, displayedTracks) {
+                    val activeId = mediaState.currentTrack?.id ?: return@LaunchedEffect
+                    val targetIdx = displayedTracks.indexOfFirst { it.id == activeId }
+                    if (targetIdx >= 0) {
+                        runCatching { listState.animateScrollToItem(targetIdx) }
+                    }
+                }
+
+                if (displayedTracks.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = "Aucun morceau ne correspond à votre recherche.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextSecondary,
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        items(displayedTracks, key = { it.id }) { track ->
+                            val isCurrent = mediaState.currentTrack?.id == track.id
+                            val coverThumb by produceState<ImageBitmap?>(
+                                initialValue = track.coverPath?.let { thumbCache.get(it) },
+                                key1 = track.id,
+                                key2 = track.coverPath,
+                            ) {
+                                val path = track.coverPath
+                                if (path == null) {
+                                    value = null
+                                } else if (value == null) {
+                                    val loaded = withContext(Dispatchers.IO) {
+                                        MetadataFetcher.loadCoverBitmapRgb565(path)?.asImageBitmap()
+                                    }
+                                    if (loaded != null) {
+                                        thumbCache.put(path, loaded)
+                                        value = loaded
+                                    }
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(if (isCurrent) container.copy(alpha = 0.85f) else CarbonSurfaceElevated)
+                                    .border(
+                                        width = if (isCurrent) 1.5.dp else 1.dp,
+                                        color = if (isCurrent) primary else Color.Transparent,
+                                        shape = RoundedCornerShape(14.dp),
+                                    )
+                                    .clickable { onPlayTrack(track) }
+                                    .padding(horizontal = if (isExpandedLayout) 14.dp else 10.dp, vertical = 10.dp)
+                                    .testTag("media_track_row_${track.id}"),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                val thumbSize = if (isExpandedLayout) 48.dp else 40.dp
+                                val bmp = coverThumb
+                                if (bmp != null) {
+                                    Image(
+                                        bitmap = bmp,
+                                        contentDescription = track.title,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier
+                                            .size(thumbSize)
+                                            .clip(RoundedCornerShape(10.dp)),
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(thumbSize)
+                                            .clip(RoundedCornerShape(10.dp))
+                                            .background(CarbonSurface),
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Rounded.MusicNote,
+                                            contentDescription = null,
+                                            tint = if (isCurrent) primary else TextSecondary,
+                                            modifier = Modifier.size(22.dp),
+                                        )
+                                    }
+                                }
+
+                                Spacer(Modifier.width(12.dp))
+
+                                if (isExpandedLayout) {
+                                    Column(modifier = Modifier.weight(1.4f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Text(
+                                                text = track.title,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = if (isCurrent) accent else TextPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false),
+                                            )
+                                            if (isCurrent) {
+                                                LightweightEqualizerBars(isPlaying = mediaState.isPlaying)
+                                            }
+                                        }
+                                        Text(
+                                            text = track.artist,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = if (isCurrent) TextPrimary else TextSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(
+                                        text = track.album.ifBlank { track.folderName },
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(0.9f),
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        text = track.year.ifBlank { "—" },
+                                        style = MaterialTheme.typography.labelMedium.copy(fontFamily = JetBrainsMonoFamily),
+                                        color = TextSecondary,
+                                        modifier = Modifier.width(52.dp),
+                                    )
+                                } else {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        ) {
+                                            Text(
+                                                text = track.title,
+                                                style = MaterialTheme.typography.titleMedium,
+                                                color = if (isCurrent) accent else TextPrimary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f, fill = false),
+                                            )
+                                            if (isCurrent) {
+                                                LightweightEqualizerBars(isPlaying = mediaState.isPlaying)
+                                            }
+                                        }
+                                        val metaLine = buildString {
+                                            append(track.artist)
+                                            if (track.album.isNotBlank() && track.album != track.folderName) {
+                                                append(" • ")
+                                                append(track.album)
+                                            }
+                                            if (track.year.isNotBlank()) {
+                                                append(" • ")
+                                                append(track.year)
+                                            }
+                                        }
+                                        Text(
+                                            text = metaLine,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = TextSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+
+                                Text(
+                                    text = AudioEngine.formatDuration(track.durationMs),
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFamily),
+                                    color = if (isCurrent) accent else TextSecondary,
+                                    modifier = Modifier.padding(horizontal = 6.dp),
+                                )
+                                IconButton(onClick = { onDeleteTrack(track.id) }) {
+                                    Icon(Icons.Rounded.Delete, contentDescription = "Retirer", tint = TextSecondary, modifier = Modifier.size(18.dp))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SourceTabButton(
     label: String,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -1596,6 +2129,64 @@ private fun EqualizerDialog(
                             modifier = Modifier.width(48.dp),
                         )
                     }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Fermer") }
+        },
+    )
+}
+
+@Composable
+private fun ImportAudioDialog(
+    onDismiss: () -> Unit,
+    onPickFolder: () -> Unit,
+    onPickFiles: () -> Unit,
+) {
+    val accent = MaterialTheme.colorScheme.secondary
+    val container = MaterialTheme.colorScheme.primaryContainer
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Importer de la musique",
+                style = MaterialTheme.typography.titleLarge,
+                color = TextPrimary,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Choisissez la source audio à indexer dans votre bibliothèque locale :",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary,
+                )
+                Button(
+                    onClick = onPickFolder,
+                    colors = ButtonDefaults.buttonColors(containerColor = container, contentColor = accent),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("media_dialog_import_folder_btn"),
+                ) {
+                    Icon(Icons.Rounded.CreateNewFolder, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("Dossier USB / SD", maxLines = 1)
+                }
+                OutlinedButton(
+                    onClick = onPickFiles,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(50.dp)
+                        .testTag("media_dialog_import_files_btn"),
+                ) {
+                    Icon(Icons.Rounded.AudioFile, contentDescription = null, tint = accent, modifier = Modifier.size(20.dp))
+                    Spacer(Modifier.width(10.dp))
+                    Text("Fichiers audio", color = accent, maxLines = 1)
                 }
             }
         },

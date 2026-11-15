@@ -2,12 +2,14 @@ package com.example.ui.screens
 
 import android.media.AudioManager
 import android.media.ToneGenerator
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -30,6 +32,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Coffee
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.GpsFixed
@@ -39,16 +42,19 @@ import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -61,7 +67,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -71,13 +79,19 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
+import com.example.data.HeadUnitSettings
 import com.example.data.MAX_DOCK_APPS
+import com.example.data.PreferencesRepository
+import com.example.data.SPEED_LIMIT_AUTO
+import com.example.data.SpeedAlertType
 import com.example.hardware.AudioEngine
 import com.example.hardware.AudioSourceMode
+import com.example.hardware.AutoSpeedLimitState
 import com.example.hardware.InstalledAppInfo
 import com.example.hardware.MediaPlayerState
 import com.example.hardware.SpeedGpsState
 import com.example.ui.components.LightweightEqualizerBars
+import com.example.ui.components.SpeedSettingsModal
 import com.example.ui.theme.AmberWarn
 import com.example.ui.theme.CarbonBorder
 import com.example.ui.theme.CarbonSurface
@@ -90,18 +104,40 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+
+private val SHORT_FRENCH_DAYS = arrayOf("Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam")
+private val SHORT_FRENCH_MONTHS = arrayOf("jan", "fév", "mar", "avr", "mai", "jun", "jul", "aoû", "sep", "oct", "nov", "déc")
+
+fun formatShortFrenchDate(date: Date): String {
+    val cal = Calendar.getInstance().apply { time = date }
+    val dayName = SHORT_FRENCH_DAYS.getOrElse(cal.get(Calendar.DAY_OF_WEEK) - 1) { "Lun" }
+    val dayOfMonth = cal.get(Calendar.DAY_OF_MONTH)
+    val monthName = SHORT_FRENCH_MONTHS.getOrElse(cal.get(Calendar.MONTH)) { "jan" }
+    val year = cal.get(Calendar.YEAR)
+    return "$dayName $dayOfMonth $monthName $year"
+}
 
 @Composable
 fun CockpitHomeScreen(
     mediaState: MediaPlayerState,
     speedState: SpeedGpsState,
-    speedLimitKmh: Int,
+    settings: HeadUnitSettings,
+    autoSpeedLimitState: AutoSpeedLimitState = AutoSpeedLimitState(),
+    showBreakReminder: Boolean = false,
     dockApps: List<InstalledAppInfo>,
     getCachedIcon: (String) -> ImageBitmap?,
     loadAppIcon: suspend (String) -> ImageBitmap?,
     onSelectSpeedLimit: (Int) -> Unit,
+    onSelectAutoDetectionSeconds: (Int) -> Unit,
+    onSelectAlertToleranceKmh: (Int) -> Unit,
+    onSelectSpeedAlertType: (String) -> Unit,
+    onSelectCalibrationOffsetKmh: (Int) -> Unit,
+    onSetBreakReminderEnabled: (Boolean) -> Unit,
+    onDismissBreakReminder: () -> Unit,
+    onTriggerSpeedAlertDucking: () -> Unit,
     onOpenMedia: () -> Unit,
     onTogglePlayPause: () -> Unit,
     onNextTrack: () -> Unit,
@@ -117,16 +153,16 @@ fun CockpitHomeScreen(
     var secondsStr by remember { mutableStateOf("") }
     var dateStr by remember { mutableStateOf("") }
     var editDockMode by remember { mutableStateOf(false) }
+    var showSpeedSettingsModal by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         val timeFmt = SimpleDateFormat("HH:mm", Locale.FRANCE)
         val secFmt = SimpleDateFormat("ss", Locale.FRANCE)
-        val dateFmt = SimpleDateFormat("EEEE d MMMM yyyy", Locale.FRANCE)
         while (true) {
             val now = Date()
             clockStr = timeFmt.format(now)
             secondsStr = secFmt.format(now)
-            dateStr = dateFmt.format(now).replaceFirstChar { it.uppercase() }
+            dateStr = formatShortFrenchDate(now)
             delay(1_000L)
         }
     }
@@ -141,17 +177,17 @@ fun CockpitHomeScreen(
         val sectionGap = if (isCompactHeight) 8.dp else 12.dp
 
         val clockFontSize = when {
-            isCompactHeight -> 42.sp
-            isMediumHeight -> 54.sp
-            else -> 66.sp
+            isCompactHeight -> 46.sp
+            isMediumHeight -> 58.sp
+            else -> 72.sp
         }
         val speedFontSize = when {
-            isCompactHeight -> 44.sp
-            isMediumHeight -> 56.sp
-            else -> 68.sp
+            isCompactHeight -> 48.sp
+            isMediumHeight -> 62.sp
+            else -> 76.sp
         }
         val cardPad = if (isCompactHeight) 14.dp else if (isMediumHeight) 18.dp else 22.dp
-        val artSize = if (isCompactHeight) 62.dp else if (isMediumHeight) 74.dp else 86.dp
+        val artSize = if (isCompactHeight) 62.dp else if (isMediumHeight) 74.dp else 88.dp
         val dockHeight = if (isCompactHeight) 74.dp else 88.dp
         val dockTileSize = if (isCompactHeight) 58.dp else 68.dp
         val dockIconSize = if (isCompactHeight) 42.dp else 50.dp
@@ -162,6 +198,10 @@ fun CockpitHomeScreen(
                 .padding(horizontal = outerHPad, vertical = outerVPad),
             verticalArrangement = Arrangement.spacedBy(sectionGap),
         ) {
+            AnimatedVisibility(visible = showBreakReminder) {
+                BreakReminderBanner(onDismiss = onDismissBreakReminder)
+            }
+
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -173,11 +213,14 @@ fun CockpitHomeScreen(
                     secondsStr = secondsStr,
                     dateStr = dateStr,
                     speedState = speedState,
-                    speedLimitKmh = speedLimitKmh,
+                    settings = settings,
+                    autoSpeedLimitState = autoSpeedLimitState,
                     clockFontSize = clockFontSize,
                     speedFontSize = speedFontSize,
                     cardPad = cardPad,
-                    onSelectSpeedLimit = onSelectSpeedLimit,
+                    isCompactHeight = isCompactHeight,
+                    onOpenSpeedSettings = { showSpeedSettingsModal = true },
+                    onTriggerSpeedAlertDucking = onTriggerSpeedAlertDucking,
                     onRequestLocationPermission = onRequestLocationPermission,
                     modifier = Modifier
                         .weight(0.95f)
@@ -215,9 +258,58 @@ fun CockpitHomeScreen(
             )
         }
     }
+
+    if (showSpeedSettingsModal) {
+        SpeedSettingsModal(
+            settings = settings,
+            speedState = speedState,
+            autoSpeedLimitState = autoSpeedLimitState,
+            onSelectSpeedLimit = onSelectSpeedLimit,
+            onSelectAutoDetectionSeconds = onSelectAutoDetectionSeconds,
+            onSelectAlertToleranceKmh = onSelectAlertToleranceKmh,
+            onSelectSpeedAlertType = onSelectSpeedAlertType,
+            onSelectCalibrationOffsetKmh = onSelectCalibrationOffsetKmh,
+            onSetBreakReminderEnabled = onSetBreakReminderEnabled,
+            onDismiss = { showSpeedSettingsModal = false },
+        )
+    }
 }
 
-private val SPEED_LIMIT_OPTIONS = listOf(0, 50, 80, 90, 110, 130)
+@Composable
+private fun BreakReminderBanner(onDismiss: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(AmberWarn.copy(alpha = 0.16f))
+            .border(1.dp, AmberWarn.copy(alpha = 0.6f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .testTag("cockpit_break_reminder_banner"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Rounded.Coffee,
+            contentDescription = "Pause conduite",
+            tint = AmberWarn,
+            modifier = Modifier.size(20.dp),
+        )
+        Text(
+            text = "2h de conduite continue — Pensez à faire une pause",
+            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            color = TextPrimary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            onClick = onDismiss,
+            modifier = Modifier.testTag("cockpit_break_reminder_dismiss_btn"),
+        ) {
+            Text("Compris", color = AmberWarn, fontWeight = FontWeight.Bold)
+        }
+    }
+}
 
 @Composable
 private fun ClockAndSpeedDashboardCard(
@@ -225,11 +317,14 @@ private fun ClockAndSpeedDashboardCard(
     secondsStr: String,
     dateStr: String,
     speedState: SpeedGpsState,
-    speedLimitKmh: Int,
+    settings: HeadUnitSettings,
+    autoSpeedLimitState: AutoSpeedLimitState,
     clockFontSize: TextUnit,
     speedFontSize: TextUnit,
     cardPad: Dp,
-    onSelectSpeedLimit: (Int) -> Unit,
+    isCompactHeight: Boolean,
+    onOpenSpeedSettings: () -> Unit,
+    onTriggerSpeedAlertDucking: () -> Unit,
     onRequestLocationPermission: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -237,7 +332,18 @@ private fun ClockAndSpeedDashboardCard(
     val accent = MaterialTheme.colorScheme.secondary
     val container = MaterialTheme.colorScheme.primaryContainer
 
-    val isOverSpeedLimit = speedLimitKmh > 0 && speedState.speedKmh > speedLimitKmh
+    val isAutoMode = settings.speedLimitKmh == SPEED_LIMIT_AUTO
+    val activeLimitKmh = if (isAutoMode) {
+        autoSpeedLimitState.detectedLimitKmh ?: 0
+    } else {
+        settings.speedLimitKmh
+    }
+    val alertType = SpeedAlertType.fromId(settings.speedAlertType)
+    val isOverSpeedLimit = PreferencesRepository.isSpeedOverLimit(
+        speedKmh = speedState.speedKmh,
+        activeLimitKmh = activeLimitKmh,
+        toleranceKmh = settings.speedAlertToleranceKmh,
+    )
     var blinkPhase by remember { mutableStateOf(false) }
 
     val toneGenerator = remember {
@@ -247,17 +353,25 @@ private fun ClockAndSpeedDashboardCard(
         onDispose { runCatching { toneGenerator?.release() } }
     }
 
-    LaunchedEffect(isOverSpeedLimit) {
+    LaunchedEffect(isOverSpeedLimit, alertType) {
         if (!isOverSpeedLimit) {
             blinkPhase = false
             return@LaunchedEffect
         }
-        var lastBeepAtMs = 0L
+        var lastAudioAlertAtMs = 0L
         while (true) {
             val now = System.currentTimeMillis()
-            if (now - lastBeepAtMs >= 8_000L) {
-                runCatching { toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 130) }
-                lastBeepAtMs = now
+            if (now - lastAudioAlertAtMs >= 8_000L) {
+                when (alertType) {
+                    SpeedAlertType.BEEP -> {
+                        runCatching { toneGenerator?.startTone(ToneGenerator.TONE_PROP_BEEP, 130) }
+                    }
+                    SpeedAlertType.DUCKING -> {
+                        onTriggerSpeedAlertDucking()
+                    }
+                    SpeedAlertType.VISUAL -> Unit
+                }
+                lastAudioAlertAtMs = now
             }
             blinkPhase = !blinkPhase
             delay(420L)
@@ -301,10 +415,15 @@ private fun ClockAndSpeedDashboardCard(
                         .background(primary),
                 )
                 Text(
-                    text = if (isOverSpeedLimit) "ALERTE VITESSE > $speedLimitKmh" else "TABLEAU DE BORD",
+                    text = if (isOverSpeedLimit) {
+                        "ALERTE LIMITE $activeLimitKmh (+${settings.speedAlertToleranceKmh})"
+                    } else {
+                        "TABLEAU DE BORD"
+                    },
                     style = MaterialTheme.typography.labelLarge,
                     color = if (isOverSpeedLimit) speedDisplayColor else accent,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
 
@@ -315,14 +434,16 @@ private fun ClockAndSpeedDashboardCard(
         }
 
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             // Bloc Horloge
             Column(
-                modifier = Modifier.weight(1.1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.weight(1.02f),
+                verticalArrangement = Arrangement.Center,
             ) {
                 Row(
                     verticalAlignment = Alignment.Bottom,
@@ -332,7 +453,7 @@ private fun ClockAndSpeedDashboardCard(
                         text = clockStr,
                         style = MaterialTheme.typography.displayLarge.copy(
                             fontSize = clockFontSize,
-                            lineHeight = clockFontSize * 1.06f,
+                            lineHeight = clockFontSize * 1.04f,
                             fontFamily = JetBrainsMonoFamily,
                             fontWeight = FontWeight.Bold,
                         ),
@@ -345,13 +466,14 @@ private fun ClockAndSpeedDashboardCard(
                             fontFamily = JetBrainsMonoFamily,
                         ),
                         color = primary,
-                        modifier = Modifier.padding(bottom = 6.dp),
+                        modifier = Modifier.padding(bottom = 8.dp),
                         maxLines = 1,
                     )
                 }
+                Spacer(Modifier.height(6.dp))
                 Text(
                     text = dateStr,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.titleMedium,
                     color = TextSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -361,73 +483,134 @@ private fun ClockAndSpeedDashboardCard(
             Box(
                 modifier = Modifier
                     .width(1.dp)
-                    .height(74.dp)
+                    .height(if (isCompactHeight) 82.dp else 108.dp)
                     .background(CarbonBorder),
             )
 
-            // Bloc Compteur de vitesse GPS (km/h)
+            // Zone Compteur GPS (cliquable pour ouvrir le menu dédié "Compteur & Alertes Vitesse")
             Column(
                 modifier = Modifier
-                    .weight(0.9f)
+                    .weight(0.98f)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(18.dp))
+                    .clickable(onClick = onOpenSpeedSettings)
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
                     .testTag("cockpit_speedometer"),
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.Center,
             ) {
-                Text(
-                    text = "${speedState.speedKmh}",
-                    style = MaterialTheme.typography.displayLarge.copy(
-                        fontSize = speedFontSize,
-                        lineHeight = speedFontSize * 1.02f,
-                        fontFamily = JetBrainsMonoFamily,
-                        fontWeight = FontWeight.Bold,
-                    ),
-                    color = speedDisplayColor,
-                    maxLines = 1,
-                )
-                Text(
-                    text = "km/h",
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontFamily = JetBrainsMonoFamily,
-                        fontWeight = FontWeight.SemiBold,
-                    ),
-                    color = if (isOverSpeedLimit) speedDisplayColor else accent,
-                    maxLines = 1,
-                )
-            }
-        }
-
-        // Rangée de boutons rapides discrets pour l'alerte de dépassement de vitesse
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            SPEED_LIMIT_OPTIONS.forEach { limit ->
-                val selected = speedLimitKmh == limit
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(34.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (selected) container else CarbonSurface)
-                        .border(
-                            1.dp,
-                            if (selected) primary else CarbonBorder.copy(alpha = 0.7f),
-                            RoundedCornerShape(10.dp),
-                        )
-                        .clickable { onSelectSpeedLimit(limit) }
-                        .testTag("speed_limit_$limit"),
-                    contentAlignment = Alignment.Center,
+                Row(
+                    verticalAlignment = Alignment.Bottom,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text(
-                        text = if (limit == 0) "Off" else "$limit",
-                        style = MaterialTheme.typography.labelSmall.copy(
+                        text = "${speedState.speedKmh}",
+                        style = MaterialTheme.typography.displayLarge.copy(
+                            fontSize = speedFontSize,
+                            lineHeight = speedFontSize * 1.02f,
                             fontFamily = JetBrainsMonoFamily,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                            fontWeight = FontWeight.Bold,
                         ),
-                        color = if (selected) accent else TextSecondary,
+                        color = speedDisplayColor,
                         maxLines = 1,
                     )
+                    Text(
+                        text = "km/h",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontFamily = JetBrainsMonoFamily,
+                            fontWeight = FontWeight.SemiBold,
+                        ),
+                        color = if (isOverSpeedLimit) speedDisplayColor else accent,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                        maxLines = 1,
+                    )
+                }
+
+                Spacer(Modifier.height(6.dp))
+
+                val badgeText = when {
+                    isAutoMode && activeLimitKmh > 0 -> "Auto • $activeLimitKmh km/h"
+                    isAutoMode -> "Auto • attente"
+                    activeLimitKmh > 0 -> "Limite • $activeLimitKmh km/h"
+                    else -> "Limite • Off"
+                }
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            when {
+                                isOverSpeedLimit -> CrimsonAlert.copy(alpha = 0.22f)
+                                activeLimitKmh > 0 -> container.copy(alpha = 0.72f)
+                                else -> CarbonSurface
+                            }
+                        )
+                        .border(
+                            1.dp,
+                            when {
+                                isOverSpeedLimit -> speedDisplayColor
+                                activeLimitKmh > 0 -> primary.copy(alpha = 0.65f)
+                                else -> CarbonBorder
+                            },
+                            RoundedCornerShape(10.dp),
+                        )
+                        .padding(horizontal = 10.dp, vertical = 5.dp)
+                        .testTag("cockpit_active_limit_badge"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Text(
+                        text = badgeText,
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontFamily = JetBrainsMonoFamily,
+                            fontWeight = FontWeight.SemiBold,
+                        ),
+                        color = when {
+                            isOverSpeedLimit -> speedDisplayColor
+                            activeLimitKmh > 0 -> accent
+                            else -> TextSecondary
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Icon(
+                        imageVector = Icons.Rounded.Tune,
+                        contentDescription = "Réglages compteur",
+                        tint = if (isOverSpeedLimit) speedDisplayColor else TextSecondary,
+                        modifier = Modifier.size(13.dp),
+                    )
+                }
+
+                // Phase 2 : petite barre de progression fine + mini chrono uniquement pendant détection active
+                if (isAutoMode && autoSpeedLimitState.isCountdownVisible) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("auto_speed_limit_progress_row"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        LinearProgressIndicator(
+                            progress = { autoSpeedLimitState.progressFraction },
+                            color = primary,
+                            trackColor = CarbonBorder,
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(50)),
+                        )
+                        Text(
+                            text = "${autoSpeedLimitState.countdownSeconds}s/${autoSpeedLimitState.countdownTotalSeconds}s",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                fontFamily = JetBrainsMonoFamily,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                            ),
+                            color = accent,
+                            maxLines = 1,
+                            modifier = Modifier.testTag("auto_speed_limit_chrono"),
+                        )
+                    }
                 }
             }
         }
@@ -527,11 +710,27 @@ private fun MediaDashboardCard(
     }
 
     val activeArt = if (isExternal) ext.albumArt else mediaState.currentAlbumArt
+    val activeArtBitmap = remember(
+        mediaState.currentTrack?.id,
+        mediaState.currentTrack?.coverPath,
+        activeArt,
+        isExternal,
+        ext.title,
+    ) {
+        activeArt?.asImageBitmap()
+    }
     val displayPos = if (isExternal) ext.positionMs else mediaState.positionMs
     val displayDur = if (isExternal) ext.durationMs else mediaState.durationMs
 
     val controlBtnSize = if (isCompactHeight) 46.dp else 54.dp
     val playControlSize = if (isCompactHeight) 54.dp else 64.dp
+    val swipeThresholdPx = with(LocalDensity.current) { 60.dp.toPx() }
+    var artDragX by remember(mediaState.currentTrack?.id, ext.title) { mutableFloatStateOf(0f) }
+    val animatedArtOffset by animateFloatAsState(
+        targetValue = artDragX * 0.45f,
+        animationSpec = spring(stiffness = 450f),
+        label = "cockpit_art_drag_offset",
+    )
 
     Column(
         modifier = modifier
@@ -575,24 +774,50 @@ private fun MediaDashboardCard(
             horizontalArrangement = Arrangement.spacedBy(14.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            if (activeArt != null) {
-                Image(
-                    bitmap = activeArt.asImageBitmap(),
-                    contentDescription = "Pochette d'album",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(artSize)
-                        .clip(RoundedCornerShape(18.dp)),
-                )
-            } else {
-                Image(
-                    painter = painterResource(id = R.drawable.img_album_red),
-                    contentDescription = "Pochette audio",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(artSize)
-                        .clip(RoundedCornerShape(18.dp)),
-                )
+            Box(
+                modifier = Modifier
+                    .size(artSize)
+                    .clip(RoundedCornerShape(18.dp))
+                    .pointerInput(mediaState.currentTrack?.id, isExternal) {
+                        detectHorizontalDragGestures(
+                            onDragStart = { artDragX = 0f },
+                            onDragCancel = { artDragX = 0f },
+                            onDragEnd = {
+                                if (artDragX > swipeThresholdPx) {
+                                    onPrevTrack()
+                                } else if (artDragX < -swipeThresholdPx) {
+                                    onNextTrack()
+                                }
+                                artDragX = 0f
+                            },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                artDragX = (artDragX + dragAmount).coerceIn(-swipeThresholdPx * 1.6f, swipeThresholdPx * 1.6f)
+                            },
+                        )
+                    }
+                    .testTag("cockpit_album_art"),
+                contentAlignment = Alignment.Center,
+            ) {
+                val artModifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { translationX = animatedArtOffset }
+                    .clip(RoundedCornerShape(18.dp))
+                if (activeArtBitmap != null) {
+                    Image(
+                        bitmap = activeArtBitmap,
+                        contentDescription = "Pochette d'album",
+                        contentScale = ContentScale.Crop,
+                        modifier = artModifier,
+                    )
+                } else {
+                    Image(
+                        painter = painterResource(id = R.drawable.img_album_red),
+                        contentDescription = "Pochette audio",
+                        contentScale = ContentScale.Crop,
+                        modifier = artModifier,
+                    )
+                }
             }
 
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -857,6 +1082,31 @@ private fun HeadUnitAppDock(
                         )
                     }
                 }
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                modifier = Modifier
+                    .padding(horizontal = 6.dp)
+                    .testTag("dock_autopulse_brand"),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(primary),
+                )
+                Text(
+                    text = "AUTOPULSE",
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        letterSpacing = 1.4.sp,
+                        fontWeight = FontWeight.Bold,
+                    ),
+                    color = TextPrimary,
+                    maxLines = 1,
+                    softWrap = false,
+                )
             }
 
             IconButton(
